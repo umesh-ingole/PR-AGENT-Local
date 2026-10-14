@@ -1,0 +1,4 @@
+cppcheck
+default-jre-headless
+checkstyle
+rubocop
