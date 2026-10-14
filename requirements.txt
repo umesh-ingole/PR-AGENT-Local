@@ -4,6 +4,6 @@ langchain-core>=0.3
 langchain-google-genai>=2.0
 langchain-ollama>=0.2
 chromadb>=0.5
-mcp>=1.2
+mcp>=1.2,<2
 pylint>=3.0
 python-dotenv>=1.0
