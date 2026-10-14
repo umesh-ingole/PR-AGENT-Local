@@ -170,6 +170,12 @@ def test_strips_supported_line_number_prefix_styles(prefix):
     assert agents._verify_finding_code(finding, source_lines)
 
 
+def test_keeps_quote_that_starts_with_decimal_number():
+    finding = _finding("2.5 * rate", line=1)
+
+    assert agents._verify_finding_code(finding, ["2.5 * rate"])
+
+
 def test_verifies_multiline_quote_with_numbered_lines(monkeypatch):
     state = {
         **_state(),

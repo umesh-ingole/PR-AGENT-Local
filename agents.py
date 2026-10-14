@@ -1,4 +1,5 @@
 """Blue boxes: Security, Bug-Detection, Summary, Coder agents."""
+import ast
 import json
 import re
 
@@ -38,9 +39,14 @@ BUG_SYSTEM = (
 
 CODER_SYSTEM = (
     "You are the Coder Agent. Fix the listed findings in the user's file with "
-    "minimal changes. Keep behavior, structure, names, and comments unless a "
-    "finding requires changing them. Return the COMPLETE corrected file in one "
-    "fenced code block and nothing else."
+    "minimal changes. Do not change function signatures, return types, or "
+    "exception types unless a finding strictly requires it. If a fix would "
+    "change behavior, keep the old behavior where possible and add a '# REVIEW:' "
+    "comment explaining the change. Never leave a hard-coded fallback for a "
+    "secret; read it with os.environ[\"NAME\"] and no default. When removing "
+    "shell=True from subprocess, split string commands with shlex.split and "
+    "keep returning the same object type as before. Return the COMPLETE corrected "
+    "file in one fenced code block and nothing else."
 )
 
 SUMMARY_SYSTEM = (
@@ -93,15 +99,19 @@ def _verify_finding_code(finding: dict, source_lines: list[str]) -> bool:
     quoted = finding.get("code")
     if not isinstance(quoted, str):
         return False
-    quoted_lines = [
-        re.sub(r"\s+", "", _LINE_NUMBER_PREFIX_RE.sub("", line, count=1))
-        for line in quoted.splitlines()
-    ]
-    while quoted_lines and not quoted_lines[0]:
-        quoted_lines.pop(0)
-    while quoted_lines and not quoted_lines[-1]:
-        quoted_lines.pop()
-    if not quoted_lines:
+    quote_variants = []
+    for strip_prefix in (False, True):
+        quoted_lines = []
+        for line in quoted.splitlines():
+            candidate = _LINE_NUMBER_PREFIX_RE.sub("", line, count=1) if strip_prefix else line
+            quoted_lines.append(re.sub(r"\s+", "", candidate))
+        while quoted_lines and not quoted_lines[0]:
+            quoted_lines.pop(0)
+        while quoted_lines and not quoted_lines[-1]:
+            quoted_lines.pop()
+        if quoted_lines and quoted_lines not in quote_variants:
+            quote_variants.append(quoted_lines)
+    if not quote_variants:
         return False
 
     line = finding.get("line")
@@ -115,15 +125,16 @@ def _verify_finding_code(finding: dict, source_lines: list[str]) -> bool:
         return False
 
     normalized_source = [re.sub(r"\s+", "", source_line) for source_line in source_lines]
-    for first_line in first_line_indices:
-        candidate_lines = normalized_source[first_line:first_line + len(quoted_lines)]
-        if len(candidate_lines) != len(quoted_lines):
-            continue
-        if all(
-            quote_line in source_line if quote_line else not source_line
-            for quote_line, source_line in zip(quoted_lines, candidate_lines)
-        ):
-            return True
+    for quoted_lines in quote_variants:
+        for first_line in first_line_indices:
+            candidate_lines = normalized_source[first_line:first_line + len(quoted_lines)]
+            if len(candidate_lines) != len(quoted_lines):
+                continue
+            if all(
+                quote_line in source_line if quote_line else not source_line
+                for quote_line, source_line in zip(quoted_lines, candidate_lines)
+            ):
+                return True
     return False
 
 
@@ -176,12 +187,72 @@ def bug_agent(state: dict) -> dict:
             f"Bug-Detection Agent dropped {dropped} finding(s) as unverified"]}
 
 
+def _function_interfaces(source: str) -> dict[str, list[tuple[str, ...]]]:
+    tree = ast.parse(source)
+    interfaces: dict[str, list[tuple[str, ...]]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        args = node.args
+        parameters = [arg.arg for arg in args.posonlyargs + args.args]
+        if args.vararg:
+            parameters.append(args.vararg.arg)
+        parameters.extend(arg.arg for arg in args.kwonlyargs)
+        if args.kwarg:
+            parameters.append(args.kwarg.arg)
+        interfaces.setdefault(node.name, []).append(tuple(parameters))
+    return interfaces
+
+
+def _check_function_interfaces(original: str, fixed: str) -> tuple[list[dict], list[str]]:
+    try:
+        original_interfaces = _function_interfaces(original)
+    except (SyntaxError, ValueError, TypeError) as exc:
+        return [], [
+            "Coder Agent interface check skipped: original Python code does not parse "
+            f"(line {getattr(exc, 'lineno', None) or 'unknown'})"
+        ]
+
+    try:
+        fixed_interfaces = _function_interfaces(fixed)
+    except (SyntaxError, ValueError, TypeError) as exc:
+        return [], [
+            "Coder Agent interface check skipped: fixed Python code does not parse "
+            f"(line {getattr(exc, 'lineno', None) or 'unknown'})"
+        ]
+
+    removed = sorted(set(original_interfaces) - set(fixed_interfaces))
+    changed = sorted(
+        name for name in original_interfaces.keys() & fixed_interfaces.keys()
+        if original_interfaces[name] != fixed_interfaces[name]
+    )
+    if not removed and not changed:
+        return [], []
+
+    changes = []
+    if removed:
+        changes.append("removed function(s): " + ", ".join(removed))
+    if changed:
+        changes.append("changed parameter name(s): " + ", ".join(changed))
+    detail = "The corrected file changed its function interface: " + "; ".join(changes) + "."
+    finding = {
+        "line": None,
+        "severity": "medium",
+        "title": "Function interface changed",
+        "detail": detail,
+        "evidence": "tool",
+        "agent": "interface-check",
+    }
+    return [finding], ["Coder Agent interface changed: " + "; ".join(changes)]
+
+
 def merge_and_score(
-    security: list[dict], bugs: list[dict], secrets: list[dict] | None = None
+    security: list[dict], bugs: list[dict], secrets: list[dict] | None = None,
+    interface: list[dict] | None = None,
 ) -> tuple[list[dict], int, bool]:
     """Deterministic merge + severity score, so the pass/fail decision is traceable."""
     best: dict[tuple, dict] = {}
-    for f in security + bugs + (secrets or []):
+    for f in security + bugs + (secrets or []) + (interface or []):
         key = (f["line"], re.sub(r"\W+", "", f["title"].lower())[:30])
         if key not in best or SEVERITIES.index(f["severity"]) < SEVERITIES.index(best[key]["severity"]):
             best[key] = f
@@ -194,7 +265,7 @@ def merge_and_score(
 def summary_agent(state: dict) -> dict:
     merged, score, passed = merge_and_score(
         state.get("security_findings", []), state.get("bug_findings", []),
-        state.get("secret_findings", []))
+        state.get("secret_findings", []), state.get("interface_findings", []))
     return {
         "merged": merged, "score": score, "passed": passed,
         "score_history": [score],
@@ -212,8 +283,18 @@ def coder_agent(state: dict) -> dict:
     m = re.search(r"```[a-zA-Z+#]*\n(.*?)```", text, re.S)
     fixed = (m.group(1) if m else text).rstrip() + "\n"
     iteration = state.get("iteration", 0) + 1
+    log = [f"Coder Agent applied fixes (round {iteration}) via {provider}; re-checking"]
+    interface_findings = []
+    if state.get("language") == "python":
+        interface_findings, interface_log = _check_function_interfaces(
+            state.get("original_code", state["current_code"]), fixed)
+        log.extend(interface_log)
+    else:
+        log.append(
+            f"Coder Agent interface check skipped for non-Python language: {state.get('language')}"
+        )
     return {"current_code": fixed, "iteration": iteration, "providers": [provider],
-            "log": [f"Coder Agent applied fixes (round {iteration}) via {provider}; re-checking"]}
+            "interface_findings": interface_findings, "log": log}
 
 
 def write_summary(state: dict) -> str:

@@ -29,6 +29,7 @@ class ReviewState(TypedDict, total=False):
     context: str
     security_findings: list
     bug_findings: list
+    interface_findings: list
     merged: list
     score: int
     passed: bool
