@@ -187,20 +187,51 @@ def bug_agent(state: dict) -> dict:
             f"Bug-Detection Agent dropped {dropped} finding(s) as unverified"]}
 
 
-def _function_interfaces(source: str) -> dict[str, list[tuple[str, ...]]]:
+def _function_interfaces(source: str) -> dict[str, list[tuple[tuple[str, str, bool], ...]]]:
     tree = ast.parse(source)
-    interfaces: dict[str, list[tuple[str, ...]]] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        args = node.args
-        parameters = [arg.arg for arg in args.posonlyargs + args.args]
-        if args.vararg:
-            parameters.append(args.vararg.arg)
-        parameters.extend(arg.arg for arg in args.kwonlyargs)
-        if args.kwarg:
-            parameters.append(args.kwarg.arg)
-        interfaces.setdefault(node.name, []).append(tuple(parameters))
+    interfaces: dict[str, list[tuple[tuple[str, str, bool], ...]]] = {}
+
+    class InterfaceVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.scope: list[str] = []
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self.scope.append(node.name)
+            for child in node.body:
+                self.visit(child)
+            self.scope.pop()
+
+        def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            args = node.args
+            positional = args.posonlyargs + args.args
+            default_start = len(positional) - len(args.defaults)
+            parameters = []
+            for index, arg in enumerate(positional):
+                kind = "positional-only" if index < len(args.posonlyargs) else "positional"
+                parameters.append((arg.arg, kind, index >= default_start))
+            if args.vararg:
+                parameters.append((args.vararg.arg, "vararg", False))
+            parameters.extend(
+                (arg.arg, "keyword-only", default is not None)
+                for arg, default in zip(args.kwonlyargs, args.kw_defaults)
+            )
+            if args.kwarg:
+                parameters.append((args.kwarg.arg, "kwarg", False))
+
+            qualified_name = ".".join(self.scope + [node.name])
+            interfaces.setdefault(qualified_name, []).append(tuple(parameters))
+            self.scope.append(node.name)
+            for child in node.body:
+                self.visit(child)
+            self.scope.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._visit_function(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._visit_function(node)
+
+    InterfaceVisitor().visit(tree)
     return interfaces
 
 
@@ -233,7 +264,7 @@ def _check_function_interfaces(original: str, fixed: str) -> tuple[list[dict], l
     if removed:
         changes.append("removed function(s): " + ", ".join(removed))
     if changed:
-        changes.append("changed parameter name(s): " + ", ".join(changed))
+        changes.append("changed parameters/defaults/variadic arguments: " + ", ".join(changed))
     detail = "The corrected file changed its function interface: " + "; ".join(changes) + "."
     finding = {
         "line": None,

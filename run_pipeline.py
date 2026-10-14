@@ -55,13 +55,14 @@ def main() -> None:
     language = EXT_TO_LANG[os.path.splitext(filename)[1].lower()]
     run_dir = create_run_directory(project_dir / "runs")
     print(f"Saving run artifacts to: {run_dir}")
+    force_local = True
     initial = {
         "filename": filename,
         "language": language,
         "original_code": code,
         "current_code": code,
-        "force_local": True,
-        "max_iterations": MAX_ITERATIONS,
+        "force_local": force_local,
+        "max_iterations": 2 if force_local else MAX_ITERATIONS,
         "providers": [],
         "log": [],
         "score_history": [],

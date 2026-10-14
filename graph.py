@@ -33,6 +33,7 @@ class ReviewState(TypedDict, total=False):
     merged: list
     score: int
     passed: bool
+    stop_no_improvement: bool
     iteration: int
     summary: str
     # parallel nodes write these, so they need reducers
@@ -82,10 +83,23 @@ def coder_node(state: ReviewState) -> dict:
 
 
 def route_after_summary(state: ReviewState) -> str:
-    limit = state.get("max_iterations", MAX_ITERATIONS)
-    if state["passed"] or state.get("iteration", 0) >= limit:
+    limit = state.get("max_iterations", 2 if state.get("force_local", False) else MAX_ITERATIONS)
+    if state["passed"] or state.get("stop_no_improvement", False) or state.get("iteration", 0) >= limit:
         return "finalize"
     return "coder"
+
+
+def summary_node(state: ReviewState) -> dict:
+    update = agents.summary_agent(state)
+    previous_scores = state.get("score_history", [])
+    if previous_scores and update["score"] <= previous_scores[-1]:
+        update["stop_no_improvement"] = True
+        update.setdefault("log", []).append(
+            f"Score did not improve ({previous_scores[-1]} -> {update['score']}); stopping early"
+        )
+    else:
+        update["stop_no_improvement"] = False
+    return update
 
 
 def finalize_node(state: ReviewState) -> dict:
@@ -111,7 +125,7 @@ def build_graph():
     g.add_node("parallel", parallel_node)
     g.add_node("security", agents.security_agent)
     g.add_node("bug", agents.bug_agent)
-    g.add_node("summary", agents.summary_agent)
+    g.add_node("summary", summary_node)
     g.add_node("coder", coder_node)
     g.add_node("finalize", finalize_node)
 

@@ -231,6 +231,7 @@ def test_loop_stops_at_max_iterations_even_if_score_never_passes(monkeypatch):
 
 def test_force_local_true_never_passes_coder_runs_exactly_twice(monkeypatch):
     calls = []
+    summary_round = {"n": 0}
 
     def fake_static(state):
         calls.append("static")
@@ -250,11 +251,13 @@ def test_force_local_true_never_passes_coder_runs_exactly_twice(monkeypatch):
 
     def fake_summary(state):
         calls.append("summary")
+        summary_round["n"] += 1
+        score = 40 + 10 * summary_round["n"]
         return {
             "merged": [],
-            "score": 60,
+            "score": score,
             "passed": False,
-            "score_history": [60],
+            "score_history": [score],
             "log": ["summary"],
         }
 
@@ -286,3 +289,66 @@ def test_force_local_true_never_passes_coder_runs_exactly_twice(monkeypatch):
 
     assert calls.count("coder") == 2
     assert calls[-1] == "finalize"
+
+
+def test_stops_after_score_fails_to_improve(monkeypatch):
+    calls = []
+    score_round = {"n": 0}
+
+    def fake_static(state):
+        calls.append("static")
+        return {"static_tool": "pylint", "static_report": "ok", "iteration": 0, "log": ["static"]}
+
+    def fake_rag(state):
+        calls.append("rag")
+        return {"context": "ctx", "log": ["rag"]}
+
+    def fake_security(state):
+        calls.append("security")
+        return {"security_findings": [], "providers": ["mock"], "log": ["security"]}
+
+    def fake_bug(state):
+        calls.append("bug")
+        return {"bug_findings": [], "providers": ["mock"], "log": ["bug"]}
+
+    def fake_summary(state):
+        calls.append("summary")
+        score_round["n"] += 1
+        score = 70 if score_round["n"] == 1 else 65
+        return {
+            "merged": [],
+            "score": score,
+            "passed": False,
+            "score_history": [score],
+            "log": ["summary"],
+        }
+
+    def fake_coder(state):
+        calls.append("coder")
+        return {
+            "current_code": "print('fixed')\n",
+            "iteration": state.get("iteration", 0) + 1,
+            "providers": ["mock"],
+            "log": ["coder"],
+        }
+
+    def fake_finalize(state):
+        calls.append("finalize")
+        return {"summary": "summary", "log": ["finalize"]}
+
+    monkeypatch.setattr(graph, "static_node", fake_static)
+    monkeypatch.setattr(graph, "rag_node", fake_rag)
+    monkeypatch.setattr(graph, "finalize_node", fake_finalize)
+    monkeypatch.setattr(graph, "run_static_analysis", lambda *_args, **_kwargs: ("pylint", "ok"))
+    monkeypatch.setattr(graph.agents, "security_agent", fake_security)
+    monkeypatch.setattr(graph.agents, "bug_agent", fake_bug)
+    monkeypatch.setattr(graph.agents, "summary_agent", fake_summary)
+    monkeypatch.setattr(graph.agents, "coder_agent", fake_coder)
+    monkeypatch.setattr(graph.agents, "write_summary", lambda state: "summary")
+
+    result = graph.build_graph().invoke(_make_state(force_local=True, max_iterations=3))
+
+    assert calls.count("summary") == 2
+    assert calls.count("coder") == 1
+    assert calls[-1] == "finalize"
+    assert any("Score did not improve" in line for line in result["log"])

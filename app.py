@@ -50,7 +50,8 @@ with st.sidebar:
     st.header("Settings")
     force_local = st.toggle("Use local model only (Ollama)", value=False,
                             help="Skips Gemini and uses Qwen2.5-Coder through Ollama.")
-    max_rounds = st.slider("Max fix rounds", 1, 5, MAX_ITERATIONS)
+    default_rounds = 2 if force_local else MAX_ITERATIONS
+    max_rounds = st.slider("Max fix rounds", 1, 5, default_rounds)
     st.caption(f"A file passes at score {PASS_SCORE}+ with no critical or high findings.")
     st.divider()
     st.caption("Provider order: Gemini, then Ollama fallback.")

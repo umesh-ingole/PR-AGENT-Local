@@ -37,6 +37,65 @@ def test_coder_reports_removed_function_and_changed_parameters(monkeypatch):
     assert any("interface changed" in line.lower() for line in result["log"])
 
 
+def test_coder_reports_changed_method_signature_with_qualified_name(monkeypatch):
+    original = "class Worker:\n    def run(self, item):\n        return item\n"
+    fixed = "class Worker:\n    def run(self, item, mode):\n        return item\n"
+    _mock_coder(monkeypatch, fixed)
+
+    result = agents.coder_agent(_state(original))
+
+    assert len(result["interface_findings"]) == 1
+    assert "Worker.run" in result["interface_findings"][0]["detail"]
+
+
+def test_coder_reports_changed_nested_function_with_qualified_name(monkeypatch):
+    original = "def outer():\n    def inner(value):\n        return value\n    return inner(1)\n"
+    fixed = "def outer():\n    def inner(value, enabled=False):\n        return value\n    return inner(1)\n"
+    _mock_coder(monkeypatch, fixed)
+
+    result = agents.coder_agent(_state(original))
+
+    assert len(result["interface_findings"]) == 1
+    assert "outer.inner" in result["interface_findings"][0]["detail"]
+
+
+def test_coder_reports_new_parameter_default(monkeypatch):
+    original = "def fetch(timeout):\n    return timeout\n"
+    fixed = "def fetch(timeout=10):\n    return timeout\n"
+    _mock_coder(monkeypatch, fixed)
+
+    result = agents.coder_agent(_state(original))
+
+    assert len(result["interface_findings"]) == 1
+    assert "fetch" in result["interface_findings"][0]["detail"]
+
+
+def test_coder_reports_added_variadic_parameters(monkeypatch):
+    original = "def call(item):\n    return item\n"
+    fixed = "def call(item, *args, **kwargs):\n    return item\n"
+    _mock_coder(monkeypatch, fixed)
+
+    result = agents.coder_agent(_state(original))
+
+    assert len(result["interface_findings"]) == 1
+    assert "call" in result["interface_findings"][0]["detail"]
+
+
+def test_coder_accepts_unchanged_function_interface(monkeypatch):
+    source = (
+        "class Worker:\n"
+        "    def run(self, item, mode='safe', *args, **kwargs):\n"
+        "        def nested(value, enabled=False):\n"
+        "            return value\n"
+        "        return nested(item)\n"
+    )
+    _mock_coder(monkeypatch, source)
+
+    result = agents.coder_agent(_state(source))
+
+    assert result["interface_findings"] == []
+
+
 def test_interface_finding_is_merged_without_code_verification(monkeypatch):
     original = "def compute(value):\n    return value\n"
     _mock_coder(monkeypatch, "def compute():\n    return 1\n")
