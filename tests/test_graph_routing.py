@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import graph
 
 
@@ -291,6 +293,46 @@ def test_force_local_true_never_passes_coder_runs_exactly_twice(monkeypatch):
     assert calls[-1] == "finalize"
 
 
+def test_first_round_does_not_stop_without_previous_score(monkeypatch):
+    monkeypatch.setattr(
+        graph.agents,
+        "summary_agent",
+        lambda _state: {
+            "score": 55,
+            "passed": False,
+            "score_history": [55],
+            "log": ["summary"],
+        },
+    )
+    state = {
+        "score_history": [],
+        "force_local": True,
+        "max_iterations": 3,
+        "iteration": 0,
+        "passed": False,
+    }
+
+    update = graph.summary_node(state)
+    next_state = {**state, **update}
+
+    assert update["stop_no_improvement"] is False
+    assert not any("stopping early" in line for line in update["log"])
+    assert graph.route_after_summary(next_state) == "coder"
+
+
+def test_force_local_false_defaults_to_three_iterations_in_all_entry_points():
+    cloud_state = {"passed": False, "iteration": 2, "force_local": False}
+    assert graph.route_after_summary(cloud_state) == "coder"
+    cloud_state["iteration"] = 3
+    assert graph.route_after_summary(cloud_state) == "finalize"
+
+    project_root = Path(__file__).resolve().parents[1]
+    app_source = (project_root / "app.py").read_text(encoding="utf-8")
+    runner_source = (project_root / "run_pipeline.py").read_text(encoding="utf-8")
+    assert "default_rounds = 2 if force_local else MAX_ITERATIONS" in app_source
+    assert '"max_iterations": 2 if force_local else MAX_ITERATIONS' in runner_source
+
+
 def test_stops_after_score_fails_to_improve(monkeypatch):
     calls = []
     score_round = {"n": 0}
@@ -314,7 +356,7 @@ def test_stops_after_score_fails_to_improve(monkeypatch):
     def fake_summary(state):
         calls.append("summary")
         score_round["n"] += 1
-        score = 70 if score_round["n"] == 1 else 65
+        score = 70
         return {
             "merged": [],
             "score": score,
@@ -351,4 +393,4 @@ def test_stops_after_score_fails_to_improve(monkeypatch):
     assert calls.count("summary") == 2
     assert calls.count("coder") == 1
     assert calls[-1] == "finalize"
-    assert any("Score did not improve" in line for line in result["log"])
+    assert any("Score did not improve (70 -> 70)" in line for line in result["log"])
