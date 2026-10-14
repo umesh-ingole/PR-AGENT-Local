@@ -126,10 +126,16 @@ def test_interface_check_skips_when_original_or_fixed_python_does_not_parse(monk
 
 
 def test_coder_prompt_preserves_interfaces_behavior_and_secret_policy():
-    assert "do not change function signatures" in agents.CODER_SYSTEM.lower()
-    assert "return types" in agents.CODER_SYSTEM.lower()
-    assert "exception types" in agents.CODER_SYSTEM.lower()
-    assert "# review:" in agents.CODER_SYSTEM.lower()
-    assert 'os.environ["name"]' in agents.CODER_SYSTEM.lower()
-    assert "shlex.split" in agents.CODER_SYSTEM
-    assert "same object type" in agents.CODER_SYSTEM
+    prompt = agents.CODER_SYSTEM.lower()
+    assert "do not change function signatures" in prompt
+    assert "return types" in prompt
+    assert "exception types" in prompt
+    assert "# review:" in prompt
+    assert 'os.environ["name"]' in prompt
+    assert "shlex.split" in prompt
+    assert "same object type" in prompt
+    assert "do not add check=true or other new exception-raising arguments" in prompt
+    assert "do not add new input restrictions or validation" in prompt
+    assert "replacing eval with json.loads changes accepted syntax" in prompt
+    assert "ast.literal_eval" in prompt
+    assert "make the smallest change that removes the problem" in prompt

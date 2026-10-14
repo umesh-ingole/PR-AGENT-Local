@@ -45,8 +45,13 @@ CODER_SYSTEM = (
     "comment explaining the change. Never leave a hard-coded fallback for a "
     "secret; read it with os.environ[\"NAME\"] and no default. When removing "
     "shell=True from subprocess, split string commands with shlex.split and "
-    "keep returning the same object type as before. Return the COMPLETE corrected "
-    "file in one fenced code block and nothing else."
+    "keep returning the same object type as before. Do not add check=True or "
+    "other new exception-raising arguments to existing calls. Do not add new "
+    "input restrictions or validation. Do not change the input format a function "
+    "accepts, for example replacing eval with json.loads changes accepted syntax; "
+    "if the finding requires it, use ast.literal_eval, which accepts the same "
+    "Python-literal syntax. Make the smallest change that removes the problem. "
+    "Return the COMPLETE corrected file in one fenced code block and nothing else."
 )
 
 SUMMARY_SYSTEM = (
