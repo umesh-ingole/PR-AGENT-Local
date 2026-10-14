@@ -4,12 +4,130 @@ Plain functions. mcp_server.py exposes them over MCP; static_analysis.py calls
 them either through MCP or directly.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 
 TIMEOUT = 60
+
+_SENSITIVE_NAME_RE = re.compile(r"key|secret|token|password|passwd|credential", re.I)
+_KEY_TOKEN_NAME_RE = re.compile(r"key|token", re.I)
+_IGNORED_NAME_SUFFIXES = ("_type", "_field", "_name", "_id", "_url", "_path")
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r'''^\s*(?P<name>[A-Za-z_]\w*)\s*(?::[^=\n]+)?\s*=\s*'''
+    r'''(?:[rRuUbBfF]{0,2})?(?P<quote>''' + "'''|\\\"\\\"\\\"|'|\\\"" + r''')'''
+    r'''(?P<value>.*?)(?P=quote)'''
+)
+_ENV_FALLBACK_RE = re.compile(
+    r'''\bos\.(?:getenv|environ\.get)\s*\(\s*'''
+    r'''(?P<key>['"])(?P<name>[^'"]+)(?P=key)\s*,\s*'''
+    r'''(?P<quote>['"])(?P<value>.*?)(?P=quote)\s*\)'''
+)
+_SECRET_VALUE_PATTERNS = (
+    ("OpenAI-style API key", re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")),
+    ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b", re.I)),
+    ("private key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY(?:-----)?")),
+)
+_PLACEHOLDERS = {
+    "changeme", "change_me", "change-me", "placeholder", "your_api_key",
+    "your-api-key", "example", "dummy", "test", "none", "null", "redacted", "default",
+}
+
+
+def _is_placeholder(value: str, name: str = "") -> bool:
+    normalized = value.strip().strip("'\"").strip().lower()
+    return (
+        not normalized
+        or normalized in _PLACEHOLDERS
+        or normalized == name.lower()
+        or bool(re.fullmatch(r"(?:x{3,}|\*{3,}|<[^>]+>)", normalized))
+    )
+
+
+def _matches_known_secret(value: str) -> bool:
+    return any(pattern.search(value) for _, pattern in _SECRET_VALUE_PATTERNS)
+
+
+def _is_plain_word(value: str) -> bool:
+    return (
+        bool(re.fullmatch(r"[A-Za-z]+", value))
+        and (value.islower() or value.isupper())
+    )
+
+
+def _is_sensitive_literal(value: str, name: str) -> bool:
+    if _is_placeholder(value, name):
+        return False
+    if _matches_known_secret(value):
+        return True
+    if _KEY_TOKEN_NAME_RE.search(name):
+        return len(value) >= 8 and not _is_plain_word(value)
+    return True
+
+
+def scan_secrets(code: str) -> list[dict]:
+    """Find hard-coded credentials deterministically without returning their values."""
+    findings_by_line: dict[int, dict] = {}
+
+    def add_finding(line: int, title: str, detail: str) -> None:
+        findings_by_line.setdefault(line, {
+            "line": line,
+            "severity": "high",
+            "title": title,
+            "detail": detail,
+            "evidence": "tool",
+            "agent": "secrets-scan",
+        })
+
+    for line_number, line in enumerate(code.splitlines(), 1):
+        assignment = _SENSITIVE_ASSIGNMENT_RE.match(line)
+        assigned_name = assignment.group("name") if assignment else ""
+        for match in _ENV_FALLBACK_RE.finditer(line):
+            name = match.group("name")
+            value = match.group("value")
+            sensitive_name = assigned_name or name
+            if (
+                (_SENSITIVE_NAME_RE.search(assigned_name) or _SENSITIVE_NAME_RE.search(name))
+                and not _is_placeholder(value, sensitive_name)
+            ):
+                add_finding(
+                    line_number,
+                    "Hard-coded fallback for a secret",
+                    "A non-placeholder string fallback is supplied to an environment lookup. "
+                    "Remove the fallback and configure the secret outside source code.",
+                )
+
+        if not assignment:
+            continue
+        name = assignment.group("name")
+        value = assignment.group("value")
+        if (
+            _SENSITIVE_NAME_RE.search(name)
+            and not name.lower().endswith(_IGNORED_NAME_SUFFIXES)
+            and _is_sensitive_literal(value, name)
+        ):
+            add_finding(
+                line_number,
+                f"Hard-coded secret in {name}",
+                f"A string literal is assigned to sensitive name '{name}'. "
+                "Load credentials from an environment variable or secret manager.",
+            )
+
+    for pattern_name, pattern in _SECRET_VALUE_PATTERNS:
+        for match in pattern.finditer(code):
+            line_number = code.count("\n", 0, match.start()) + 1
+            if _is_placeholder(match.group(0)):
+                continue
+            add_finding(
+                line_number,
+                f"Hard-coded {pattern_name}",
+                f"A string literal matches a known {pattern_name} format. "
+                "Remove it from source and rotate it if it is active.",
+            )
+
+    return [findings_by_line[line] for line in sorted(findings_by_line)]
 
 
 def _run(cmd: list[str]) -> str:

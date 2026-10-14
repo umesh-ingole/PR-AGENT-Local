@@ -121,10 +121,12 @@ def bug_agent(state: dict) -> dict:
             "log": [f"Bug-Detection Agent found {len(findings)} issue(s) via {provider}{retry_note}"]}
 
 
-def merge_and_score(security: list[dict], bugs: list[dict]) -> tuple[list[dict], int, bool]:
+def merge_and_score(
+    security: list[dict], bugs: list[dict], secrets: list[dict] | None = None
+) -> tuple[list[dict], int, bool]:
     """Deterministic merge + severity score, so the pass/fail decision is traceable."""
     best: dict[tuple, dict] = {}
-    for f in security + bugs:
+    for f in security + bugs + (secrets or []):
         key = (f["line"], re.sub(r"\W+", "", f["title"].lower())[:30])
         if key not in best or SEVERITIES.index(f["severity"]) < SEVERITIES.index(best[key]["severity"]):
             best[key] = f
@@ -136,7 +138,8 @@ def merge_and_score(security: list[dict], bugs: list[dict]) -> tuple[list[dict],
 
 def summary_agent(state: dict) -> dict:
     merged, score, passed = merge_and_score(
-        state.get("security_findings", []), state.get("bug_findings", []))
+        state.get("security_findings", []), state.get("bug_findings", []),
+        state.get("secret_findings", []))
     return {
         "merged": merged, "score": score, "passed": passed,
         "score_history": [score],

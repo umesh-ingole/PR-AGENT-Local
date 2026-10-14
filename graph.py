@@ -13,6 +13,7 @@ import agents
 from config import MAX_ITERATIONS
 from rag import retrieve_context
 from static_analysis import run_static_analysis
+from tools import scan_secrets
 
 
 class ReviewState(TypedDict, total=False):
@@ -24,6 +25,7 @@ class ReviewState(TypedDict, total=False):
     max_iterations: int
     static_tool: str
     static_report: str
+    secret_findings: list
     context: str
     security_findings: list
     bug_findings: list
@@ -39,9 +41,23 @@ class ReviewState(TypedDict, total=False):
 
 
 def static_node(state: ReviewState) -> dict:
-    tool, report = run_static_analysis(state["language"], state["current_code"])
-    return {"static_tool": tool, "static_report": report, "iteration": 0,
-            "log": [f"Static analysis ran {tool}"]}
+    code = state["current_code"]
+    tool, report = run_static_analysis(state["language"], code)
+    secret_findings = scan_secrets(code)
+    report = _append_secret_findings(report, secret_findings)
+    log = [f"Static analysis ran {tool}"]
+    if secret_findings:
+        log.append(f"Secrets scan found {len(secret_findings)} hard-coded credential(s)")
+    return {"static_tool": tool, "static_report": report, "secret_findings": secret_findings,
+            "iteration": 0, "log": log}
+
+
+def _append_secret_findings(report: str, findings: list[dict]) -> str:
+    if not findings:
+        return report
+    entries = [f"{item['line']}:{item['severity']}:{item['title']} - {item['detail']}"
+               for item in findings]
+    return f"{report}\n\nDeterministic secrets scan:\n" + "\n".join(entries)
 
 
 def rag_node(state: ReviewState) -> dict:
@@ -52,8 +68,15 @@ def rag_node(state: ReviewState) -> dict:
 def coder_node(state: ReviewState) -> dict:
     update = agents.coder_agent(state)
     # Refresh the linter output on the fixed code so the re-check is grounded.
-    tool, report = run_static_analysis(state["language"], update["current_code"])
-    update.update({"static_tool": tool, "static_report": report})
+    code = update["current_code"]
+    tool, report = run_static_analysis(state["language"], code)
+    secret_findings = scan_secrets(code)
+    report = _append_secret_findings(report, secret_findings)
+    update.update({"static_tool": tool, "static_report": report,
+                   "secret_findings": secret_findings})
+    if secret_findings:
+        update.setdefault("log", []).append(
+            f"Secrets scan found {len(secret_findings)} hard-coded credential(s)")
     return update
 
 
