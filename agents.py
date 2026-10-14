@@ -5,10 +5,13 @@ import re
 from config import PASS_SCORE, SEVERITIES, SEVERITY_PENALTY
 from llm_gateway import call_llm
 
+_LINE_NUMBER_PREFIX_RE = re.compile(r"^\s*(?:L\s*)?\d+(?:\s*[:|.]|\s+)\s*")
+
 FINDING_SCHEMA = (
     'Return ONLY a JSON array (no prose, no markdown fences). Each item: '
     '{"line": <int or null>, "severity": "critical|high|medium|low", '
     '"title": "<short>", "detail": "<what is wrong and how to fix it>", '
+    '"code": "<exact offending line copied from the file>", '
     '"evidence": "tool|reasoning"}. Use "tool" only when a static-analysis line '
     'supports the finding. Return [] if there are no issues.'
 )
@@ -18,7 +21,9 @@ SECURITY_SYSTEM = (
     "vulnerabilities only: injection, hard-coded secrets, unsafe memory use, "
     "weak crypto, unsafe deserialization, missing validation. Do not report "
     "style or non-security bugs. Ground findings in the static analysis output "
-    "and retrieved guidance when relevant. " + FINDING_SCHEMA
+    "and retrieved guidance when relevant. This code may already have been "
+    "corrected. Report only problems present in the code shown, and quote the line. "
+    + FINDING_SCHEMA
 )
 
 BUG_SYSTEM = (
@@ -26,7 +31,9 @@ BUG_SYSTEM = (
     "errors, crashes, resource leaks, off-by-one errors, unhandled edge cases, "
     "and style violations that hurt correctness. Do not report security issues "
     "(another agent does). Ground findings in the static analysis output and "
-    "retrieved guidance when relevant. " + FINDING_SCHEMA
+    "retrieved guidance when relevant. This code may already have been "
+    "corrected. Report only problems present in the code shown, and quote the line. "
+    + FINDING_SCHEMA
 )
 
 CODER_SYSTEM = (
@@ -75,13 +82,58 @@ def _normalize(items: list[dict], agent: str) -> list[dict]:
             "severity": sev,
             "title": str(d.get("title", "Issue"))[:120],
             "detail": str(d.get("detail", ""))[:600],
+            "code": d["code"],
             "evidence": "tool" if d.get("evidence") == "tool" else "reasoning",
             "agent": agent,
         })
     return out
 
 
-def _review(system: str, agent: str, state: dict) -> tuple[list[dict], str, bool]:
+def _verify_finding_code(finding: dict, source_lines: list[str]) -> bool:
+    quoted = finding.get("code")
+    if not isinstance(quoted, str):
+        return False
+    quoted_lines = [
+        re.sub(r"\s+", "", _LINE_NUMBER_PREFIX_RE.sub("", line, count=1))
+        for line in quoted.splitlines()
+    ]
+    while quoted_lines and not quoted_lines[0]:
+        quoted_lines.pop(0)
+    while quoted_lines and not quoted_lines[-1]:
+        quoted_lines.pop()
+    if not quoted_lines:
+        return False
+
+    line = finding.get("line")
+    if line is None:
+        first_line_indices = range(len(source_lines))
+    elif isinstance(line, int) and not isinstance(line, bool) and line > 0:
+        start = max(0, line - 3)
+        end = min(len(source_lines), line + 2)
+        first_line_indices = range(start, end)
+    else:
+        return False
+
+    normalized_source = [re.sub(r"\s+", "", source_line) for source_line in source_lines]
+    for first_line in first_line_indices:
+        candidate_lines = normalized_source[first_line:first_line + len(quoted_lines)]
+        if len(candidate_lines) != len(quoted_lines):
+            continue
+        if all(
+            quote_line in source_line if quote_line else not source_line
+            for quote_line, source_line in zip(quoted_lines, candidate_lines)
+        ):
+            return True
+    return False
+
+
+def _verified_findings(items: list[dict], code: str) -> tuple[list[dict], int]:
+    source_lines = code.splitlines()
+    verified = [item for item in items if _verify_finding_code(item, source_lines)]
+    return verified, len(items) - len(verified)
+
+
+def _review(system: str, agent: str, state: dict) -> tuple[list[dict], str, bool, int]:
     user = (
         f"Language: {state['language']}\n\n"
         f"STATIC ANALYSIS ({state['static_tool']}):\n{state['static_report'][:3000]}\n\n"
@@ -104,21 +156,24 @@ def _review(system: str, agent: str, state: dict) -> tuple[list[dict], str, bool
         text, provider = call_llm(strict_system, user, state.get("force_local", False))
         items = _parse_json_array(text)
         retried = True
-    return _normalize(items, agent), provider, retried
+    items, dropped = _verified_findings(items, state["current_code"])
+    return _normalize(items, agent), provider, retried, dropped
 
 
 def security_agent(state: dict) -> dict:
-    findings, provider, retried = _review(SECURITY_SYSTEM, "security-agent", state)
+    findings, provider, retried, dropped = _review(SECURITY_SYSTEM, "security-agent", state)
     retry_note = "; retried invalid JSON once" if retried else ""
     return {"security_findings": findings, "providers": [provider],
-            "log": [f"Security Agent found {len(findings)} issue(s) via {provider}{retry_note}"]}
+        "log": [f"Security Agent found {len(findings)} issue(s) via {provider}{retry_note}",
+            f"Security Agent dropped {dropped} finding(s) as unverified"]}
 
 
 def bug_agent(state: dict) -> dict:
-    findings, provider, retried = _review(BUG_SYSTEM, "bug-agent", state)
+    findings, provider, retried, dropped = _review(BUG_SYSTEM, "bug-agent", state)
     retry_note = "; retried invalid JSON once" if retried else ""
     return {"bug_findings": findings, "providers": [provider],
-            "log": [f"Bug-Detection Agent found {len(findings)} issue(s) via {provider}{retry_note}"]}
+        "log": [f"Bug-Detection Agent found {len(findings)} issue(s) via {provider}{retry_note}",
+            f"Bug-Detection Agent dropped {dropped} finding(s) as unverified"]}
 
 
 def merge_and_score(
