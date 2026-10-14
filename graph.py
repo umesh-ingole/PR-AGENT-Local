@@ -103,7 +103,12 @@ def summary_node(state: ReviewState) -> dict:
 
 
 def finalize_node(state: ReviewState) -> dict:
-    return {"summary": agents.write_summary(state), "log": ["Report and fixed file ready"]}
+    summary, provider = agents.write_summary_with_provider(state)
+    if provider:
+        summary_log = f"Summary report generated via {provider}"
+    else:
+        summary_log = "Summary report generated with deterministic fallback; no LLM provider succeeded"
+    return {"summary": summary, "log": [summary_log, "Report and fixed file ready"]}
 
 
 def route_rag_node(state: ReviewState) -> str:

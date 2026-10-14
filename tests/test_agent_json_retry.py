@@ -36,6 +36,7 @@ def test_ollama_invalid_json_gets_one_strict_retry(monkeypatch):
     assert "STRICT FORMAT REMINDER" in calls[1][0]
     assert calls[1][2] is True
     assert "retried invalid JSON once" in result["log"][0]
+    assert "via ollama, ollama" in result["log"][0]
 
 
 def test_second_invalid_ollama_response_fails_after_one_retry(monkeypatch):

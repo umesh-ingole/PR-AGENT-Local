@@ -144,7 +144,7 @@ def _verified_findings(items: list[dict], code: str) -> tuple[list[dict], int]:
     return verified, len(items) - len(verified)
 
 
-def _review(system: str, agent: str, state: dict) -> tuple[list[dict], str, bool, int]:
+def _review(system: str, agent: str, state: dict) -> tuple[list[dict], list[str], bool, int]:
     user = (
         f"Language: {state['language']}\n\n"
         f"STATIC ANALYSIS ({state['static_tool']}):\n{state['static_report'][:3000]}\n\n"
@@ -152,6 +152,7 @@ def _review(system: str, agent: str, state: dict) -> tuple[list[dict], str, bool
         f"CODE (line-numbered):\n{_numbered(state['current_code'])}"
     )
     text, provider = call_llm(system, user, state.get("force_local", False))
+    providers = [provider]
     retried = False
     try:
         items = _parse_json_array(text)
@@ -165,25 +166,26 @@ def _review(system: str, agent: str, state: dict) -> tuple[list[dict], str, bool
             "prose, markdown fences, or explanations. Return [] if there are no issues."
         )
         text, provider = call_llm(strict_system, user, state.get("force_local", False))
+        providers.append(provider)
         items = _parse_json_array(text)
         retried = True
     items, dropped = _verified_findings(items, state["current_code"])
-    return _normalize(items, agent), provider, retried, dropped
+    return _normalize(items, agent), providers, retried, dropped
 
 
 def security_agent(state: dict) -> dict:
-    findings, provider, retried, dropped = _review(SECURITY_SYSTEM, "security-agent", state)
+    findings, providers, retried, dropped = _review(SECURITY_SYSTEM, "security-agent", state)
     retry_note = "; retried invalid JSON once" if retried else ""
-    return {"security_findings": findings, "providers": [provider],
-        "log": [f"Security Agent found {len(findings)} issue(s) via {provider}{retry_note}",
+    return {"security_findings": findings, "providers": providers,
+        "log": [f"Security Agent found {len(findings)} issue(s) via {', '.join(providers)}{retry_note}",
             f"Security Agent dropped {dropped} finding(s) as unverified"]}
 
 
 def bug_agent(state: dict) -> dict:
-    findings, provider, retried, dropped = _review(BUG_SYSTEM, "bug-agent", state)
+    findings, providers, retried, dropped = _review(BUG_SYSTEM, "bug-agent", state)
     retry_note = "; retried invalid JSON once" if retried else ""
-    return {"bug_findings": findings, "providers": [provider],
-        "log": [f"Bug-Detection Agent found {len(findings)} issue(s) via {provider}{retry_note}",
+    return {"bug_findings": findings, "providers": providers,
+        "log": [f"Bug-Detection Agent found {len(findings)} issue(s) via {', '.join(providers)}{retry_note}",
             f"Bug-Detection Agent dropped {dropped} finding(s) as unverified"]}
 
 
@@ -328,14 +330,21 @@ def coder_agent(state: dict) -> dict:
             "interface_findings": interface_findings, "log": log}
 
 
-def write_summary(state: dict) -> str:
+def write_summary_with_provider(state: dict) -> tuple[str, str | None]:
     counts = {s: sum(1 for f in state["merged"] if f["severity"] == s) for s in SEVERITIES}
     user = (f"Language: {state['language']}\nFinal score: {state['score']}/100\n"
             f"Remaining findings by severity: {counts}\nFix rounds: {state.get('iteration', 0)}\n"
             f"Remaining findings: {json.dumps(state['merged'][:15])}")
     try:
-        text, _ = call_llm(SUMMARY_SYSTEM, user, state.get("force_local", False))
-        return text.strip()
+        text, provider = call_llm(SUMMARY_SYSTEM, user, state.get("force_local", False))
+        return text.strip(), provider
     except Exception:
-        return (f"Final score {state['score']}/100 after {state.get('iteration', 0)} fix round(s). "
-                f"Remaining: {counts}.")
+        return (
+            f"Final score {state['score']}/100 after {state.get('iteration', 0)} fix round(s). "
+            f"Remaining: {counts}.",
+            None,
+        )
+
+
+def write_summary(state: dict) -> str:
+    return write_summary_with_provider(state)[0]

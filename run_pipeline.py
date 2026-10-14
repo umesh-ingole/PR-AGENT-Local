@@ -1,4 +1,5 @@
 """Run the sample review pipeline without starting the Streamlit UI."""
+import argparse
 import json
 import difflib
 import os
@@ -8,6 +9,31 @@ from pathlib import Path
 
 from config import EXT_TO_LANG, MAX_ITERATIONS
 from graph import build_graph
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--cloud",
+        action="store_true",
+        help="Use Gemini first with Ollama fallback and allow three fix rounds.",
+    )
+    return parser.parse_args(argv)
+
+
+def pipeline_settings(cloud: bool) -> dict:
+    return {
+        "force_local": not cloud,
+        "max_iterations": MAX_ITERATIONS if cloud else 2,
+        "provider_order": "gemini,ollama" if cloud else "ollama",
+        "mode": "cloud (Gemini first, Ollama fallback)" if cloud else "local-only (Ollama)",
+    }
+
+
+def cloud_startup_warning(cloud: bool) -> str | None:
+    if cloud and not os.getenv("GOOGLE_API_KEY"):
+        return "GOOGLE_API_KEY not set: --cloud will fall back to the local model and be slow."
+    return None
 
 
 def create_run_directory(runs_dir: Path) -> Path:
@@ -45,7 +71,15 @@ def save_final_artifacts(run_dir: Path, filename: str, original: str, fixed: str
     return fixed_path, diff_path
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    settings = pipeline_settings(parse_args(argv).cloud)
+    if not settings["force_local"]:
+        os.environ["LLM_PROVIDERS"] = settings["provider_order"]
+    print(f"Mode: {settings['mode']}; max_iterations={settings['max_iterations']}")
+    warning = cloud_startup_warning(not settings["force_local"])
+    if warning:
+        print(f"Warning: {warning}")
+
     project_dir = Path(__file__).resolve().parent
     sample_path = project_dir / "sample" / "buggy_sample.py"
     with sample_path.open(encoding="utf-8") as sample_file:
@@ -55,14 +89,13 @@ def main() -> None:
     language = EXT_TO_LANG[os.path.splitext(filename)[1].lower()]
     run_dir = create_run_directory(project_dir / "runs")
     print(f"Saving run artifacts to: {run_dir}")
-    force_local = True
     initial = {
         "filename": filename,
         "language": language,
         "original_code": code,
         "current_code": code,
-        "force_local": force_local,
-        "max_iterations": 2 if force_local else MAX_ITERATIONS,
+        "force_local": settings["force_local"],
+        "max_iterations": settings["max_iterations"],
         "providers": [],
         "log": [],
         "score_history": [],

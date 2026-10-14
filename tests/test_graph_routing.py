@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import graph
+from run_pipeline import pipeline_settings
 
 
 def _make_state(force_local: bool, max_iterations: int = 2):
@@ -80,7 +81,7 @@ def test_force_local_true_exact_serial_order_and_no_overlap(monkeypatch):
     monkeypatch.setattr(graph.agents, "bug_agent", fake_bug)
     monkeypatch.setattr(graph.agents, "summary_agent", fake_summary)
     monkeypatch.setattr(graph.agents, "coder_agent", fake_coder)
-    monkeypatch.setattr(graph.agents, "write_summary", lambda state: "summary")
+    monkeypatch.setattr(graph.agents, "write_summary_with_provider", lambda state: ("summary", "mock"))
 
     compiled = graph.build_graph()
     compiled.invoke(_make_state(force_local=True, max_iterations=2))
@@ -152,7 +153,7 @@ def test_force_local_false_runs_security_and_bug_each_round(monkeypatch):
     monkeypatch.setattr(graph.agents, "bug_agent", fake_bug)
     monkeypatch.setattr(graph.agents, "summary_agent", fake_summary)
     monkeypatch.setattr(graph.agents, "coder_agent", fake_coder)
-    monkeypatch.setattr(graph.agents, "write_summary", lambda state: "summary")
+    monkeypatch.setattr(graph.agents, "write_summary_with_provider", lambda state: ("summary", "mock"))
 
     compiled = graph.build_graph()
     compiled.invoke(_make_state(force_local=False, max_iterations=2))
@@ -218,7 +219,7 @@ def test_loop_stops_at_max_iterations_even_if_score_never_passes(monkeypatch):
     monkeypatch.setattr(graph.agents, "bug_agent", fake_bug)
     monkeypatch.setattr(graph.agents, "summary_agent", fake_summary)
     monkeypatch.setattr(graph.agents, "coder_agent", fake_coder)
-    monkeypatch.setattr(graph.agents, "write_summary", lambda state: "summary")
+    monkeypatch.setattr(graph.agents, "write_summary_with_provider", lambda state: ("summary", "mock"))
 
     compiled = graph.build_graph()
     compiled.invoke(_make_state(force_local=True, max_iterations=1))
@@ -284,7 +285,7 @@ def test_force_local_true_never_passes_coder_runs_exactly_twice(monkeypatch):
     monkeypatch.setattr(graph.agents, "bug_agent", fake_bug)
     monkeypatch.setattr(graph.agents, "summary_agent", fake_summary)
     monkeypatch.setattr(graph.agents, "coder_agent", fake_coder)
-    monkeypatch.setattr(graph.agents, "write_summary", lambda state: "summary")
+    monkeypatch.setattr(graph.agents, "write_summary_with_provider", lambda state: ("summary", "mock"))
 
     compiled = graph.build_graph()
     compiled.invoke(_make_state(force_local=True, max_iterations=2))
@@ -328,9 +329,8 @@ def test_force_local_false_defaults_to_three_iterations_in_all_entry_points():
 
     project_root = Path(__file__).resolve().parents[1]
     app_source = (project_root / "app.py").read_text(encoding="utf-8")
-    runner_source = (project_root / "run_pipeline.py").read_text(encoding="utf-8")
     assert "default_rounds = 2 if force_local else MAX_ITERATIONS" in app_source
-    assert '"max_iterations": 2 if force_local else MAX_ITERATIONS' in runner_source
+    assert pipeline_settings(cloud=True)["max_iterations"] == 3
 
 
 def test_stops_after_score_fails_to_improve(monkeypatch):
@@ -386,7 +386,7 @@ def test_stops_after_score_fails_to_improve(monkeypatch):
     monkeypatch.setattr(graph.agents, "bug_agent", fake_bug)
     monkeypatch.setattr(graph.agents, "summary_agent", fake_summary)
     monkeypatch.setattr(graph.agents, "coder_agent", fake_coder)
-    monkeypatch.setattr(graph.agents, "write_summary", lambda state: "summary")
+    monkeypatch.setattr(graph.agents, "write_summary_with_provider", lambda state: ("summary", "mock"))
 
     result = graph.build_graph().invoke(_make_state(force_local=True, max_iterations=3))
 
@@ -394,3 +394,16 @@ def test_stops_after_score_fails_to_improve(monkeypatch):
     assert calls.count("coder") == 1
     assert calls[-1] == "finalize"
     assert any("Score did not improve (70 -> 70)" in line for line in result["log"])
+
+
+def test_finalize_logs_summary_llm_provider(monkeypatch):
+    monkeypatch.setattr(
+        graph.agents,
+        "write_summary_with_provider",
+        lambda _state: ("summary", "gemini"),
+    )
+
+    result = graph.finalize_node({})
+
+    assert result["summary"] == "summary"
+    assert "Summary report generated via gemini" in result["log"]
