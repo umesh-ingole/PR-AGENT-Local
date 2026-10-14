@@ -119,8 +119,8 @@ def route_security_node(state: ReviewState) -> str:
     return "bug" if state.get("force_local", False) else "summary"
 
 
-def parallel_node(state: ReviewState) -> ReviewState:
-    return state
+def parallel_node(state: ReviewState) -> dict:
+    return {}
 
 
 def build_graph():

@@ -407,3 +407,85 @@ def test_finalize_logs_summary_llm_provider(monkeypatch):
 
     assert result["summary"] == "summary"
     assert "Summary report generated via gemini" in result["log"]
+
+
+def test_cloud_three_rounds_record_only_summary_scores_and_findings(monkeypatch):
+    calls = {"security": 0, "bug": 0, "summary": 0}
+    security_finding = {
+        "line": 1, "severity": "medium", "title": "Security finding",
+        "detail": "example", "evidence": "tool", "agent": "security-agent",
+    }
+    bug_finding = {
+        "line": 2, "severity": "low", "title": "Bug finding",
+        "detail": "example", "evidence": "tool", "agent": "bug-agent",
+    }
+
+    monkeypatch.setattr(
+        graph, "static_node",
+        lambda _state: {"static_tool": "none", "static_report": "ok", "iteration": 0, "log": []},
+    )
+    monkeypatch.setattr(graph, "rag_node", lambda _state: {"context": "ctx", "log": []})
+    monkeypatch.setattr(graph, "finalize_node", lambda _state: {"summary": "done", "log": []})
+
+    def fake_security(_state):
+        calls["security"] += 1
+        return {
+            "security_findings": [security_finding],
+            "providers": ["mock"],
+            "log": ["security emitted"],
+        }
+
+    def fake_bug(_state):
+        calls["bug"] += 1
+        return {
+            "bug_findings": [bug_finding],
+            "providers": ["mock"],
+            "log": ["bug emitted"],
+        }
+
+    def fake_summary(state):
+        calls["summary"] += 1
+        score = 40 + (calls["summary"] * 10)
+        return {
+            "merged": state["security_findings"] + state["bug_findings"],
+            "score": score,
+            "passed": False,
+            "score_history": [score],
+            "log": [f"summary {calls['summary']}"],
+        }
+
+    def fake_coder(state):
+        return {
+            "current_code": state["current_code"],
+            "iteration": state.get("iteration", 0) + 1,
+            "providers": ["mock"],
+            "log": ["coder emitted"],
+        }
+
+    monkeypatch.setattr(graph.agents, "security_agent", fake_security)
+    monkeypatch.setattr(graph.agents, "bug_agent", fake_bug)
+    monkeypatch.setattr(graph.agents, "summary_agent", fake_summary)
+    monkeypatch.setattr(graph.agents, "coder_agent", fake_coder)
+    monkeypatch.setattr(graph, "run_static_analysis", lambda *_args: ("none", "ok"))
+
+    initial = _make_state(force_local=False, max_iterations=2)
+    updates = list(graph.build_graph().stream(initial, stream_mode="updates"))
+    summary_updates = [update["summary"] for update in updates if "summary" in update]
+    parallel_updates = [update["parallel"] for update in updates if "parallel" in update]
+
+    assert len(summary_updates) == 3
+    assert [update["score"] for update in summary_updates] == [50, 60, 70]
+    assert all(not update or "score" not in update for update in parallel_updates)
+    assert all(
+        not update or "security_findings" not in update and "bug_findings" not in update
+        for update in parallel_updates
+    )
+
+    calls.update(security=0, bug=0, summary=0)
+    result = graph.build_graph().invoke(initial)
+
+    assert result["score_history"] == [50, 60, 70]
+    assert calls == {"security": 3, "bug": 3, "summary": 3}
+    assert result["merged"] == [security_finding, bug_finding]
+    assert result["log"].count("security emitted") == 3
+    assert result["log"].count("bug emitted") == 3
