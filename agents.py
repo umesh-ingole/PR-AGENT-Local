@@ -48,15 +48,19 @@ def _numbered(code: str) -> str:
 
 
 def _parse_json_array(text: str) -> list[dict]:
-    text = re.sub(r"```(?:json)?", "", text).strip()
-    start, end = text.find("["), text.rfind("]")
-    if start == -1 or end == -1:
-        return []
+    text = text.strip()
+    if text.startswith("```"):
+        match = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.S | re.I)
+        if not match:
+            raise ValueError("Response contains an incomplete JSON code fence")
+        text = match.group(1).strip()
     try:
-        data = json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        return []
-    return [d for d in data if isinstance(d, dict)]
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Response is not a valid JSON array") from exc
+    if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+        raise ValueError("Response must be a JSON array of finding objects")
+    return data
 
 
 def _normalize(items: list[dict], agent: str) -> list[dict]:
@@ -77,7 +81,7 @@ def _normalize(items: list[dict], agent: str) -> list[dict]:
     return out
 
 
-def _review(system: str, agent: str, state: dict) -> tuple[list[dict], str]:
+def _review(system: str, agent: str, state: dict) -> tuple[list[dict], str, bool]:
     user = (
         f"Language: {state['language']}\n\n"
         f"STATIC ANALYSIS ({state['static_tool']}):\n{state['static_report'][:3000]}\n\n"
@@ -85,19 +89,36 @@ def _review(system: str, agent: str, state: dict) -> tuple[list[dict], str]:
         f"CODE (line-numbered):\n{_numbered(state['current_code'])}"
     )
     text, provider = call_llm(system, user, state.get("force_local", False))
-    return _normalize(_parse_json_array(text), agent), provider
+    retried = False
+    try:
+        items = _parse_json_array(text)
+    except ValueError:
+        if provider != "ollama":
+            raise
+        strict_system = (
+            system
+            + "\n\nSTRICT FORMAT REMINDER: Your previous response was invalid. "
+            "Return only one valid JSON array of finding objects. Do not include "
+            "prose, markdown fences, or explanations. Return [] if there are no issues."
+        )
+        text, provider = call_llm(strict_system, user, state.get("force_local", False))
+        items = _parse_json_array(text)
+        retried = True
+    return _normalize(items, agent), provider, retried
 
 
 def security_agent(state: dict) -> dict:
-    findings, provider = _review(SECURITY_SYSTEM, "security-agent", state)
+    findings, provider, retried = _review(SECURITY_SYSTEM, "security-agent", state)
+    retry_note = "; retried invalid JSON once" if retried else ""
     return {"security_findings": findings, "providers": [provider],
-            "log": [f"Security Agent found {len(findings)} issue(s) via {provider}"]}
+            "log": [f"Security Agent found {len(findings)} issue(s) via {provider}{retry_note}"]}
 
 
 def bug_agent(state: dict) -> dict:
-    findings, provider = _review(BUG_SYSTEM, "bug-agent", state)
+    findings, provider, retried = _review(BUG_SYSTEM, "bug-agent", state)
+    retry_note = "; retried invalid JSON once" if retried else ""
     return {"bug_findings": findings, "providers": [provider],
-            "log": [f"Bug-Detection Agent found {len(findings)} issue(s) via {provider}"]}
+            "log": [f"Bug-Detection Agent found {len(findings)} issue(s) via {provider}{retry_note}"]}
 
 
 def merge_and_score(security: list[dict], bugs: list[dict]) -> tuple[list[dict], int, bool]:
