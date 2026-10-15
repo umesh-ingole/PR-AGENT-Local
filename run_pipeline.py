@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from config import EXT_TO_LANG, MAX_ITERATIONS
+import agents
 from graph import build_graph
 import llm_gateway
 from static_analysis import static_analysis_mode
@@ -206,6 +207,7 @@ def main(argv: list[str] | None = None) -> None:
         "dropped_finding_counts": [],
         "dropped_unverified_history": [],
         "dropped_finding_count_index": 0,
+        "review_incomplete": False,
     }
     final = dict(initial)
     score_round = 0
@@ -264,6 +266,9 @@ def main(argv: list[str] | None = None) -> None:
             start_time, elapsed, reason,
         ),
     )
+    banner = agents.review_incomplete_banner(final)
+    if banner:
+        print(banner)
     print(
         f"\nFinal score: {final['score']}/100; "
         f"raw penalty: {final['raw_penalty']}"

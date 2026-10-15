@@ -9,6 +9,10 @@ from config import PASS_SCORE, SEVERITIES, SEVERITY_PENALTY
 from llm_gateway import call_llm
 
 _LINE_NUMBER_PREFIX_RE = re.compile(r"^\s*(?:L\s*)?\d+(?:\s*[:|.]|\s+)\s*")
+REVIEW_INCOMPLETE_BANNER = (
+    "Review incomplete: the model was unavailable. "
+    "The score reflects tool checks only."
+)
 
 FINDING_SCHEMA = (
     'Return ONLY a JSON array (no prose, no markdown fences). Each item: '
@@ -202,11 +206,26 @@ def _llm_unavailable_finding(agent: str, detail: str) -> dict:
         "code": "",
         "evidence": "tool",
         "agent": "llm-unavailable",
+        "stage": agent,
     }
 
 
 def _is_llm_warning(finding: dict) -> bool:
     return finding.get("agent") in {"llm-unavailable", "agent-response-error"}
+
+
+def _is_incomplete_review_warning(finding: dict) -> bool:
+    if finding.get("agent") == "agent-response-error":
+        return True
+    stage = str(finding.get("stage", "")).lower().replace("-", " ")
+    return (
+        finding.get("agent") == "llm-unavailable"
+        and stage in {"security agent", "bug agent", "summary agent"}
+    )
+
+
+def review_incomplete_banner(state: dict) -> str:
+    return REVIEW_INCOMPLETE_BANNER if state.get("review_incomplete", False) else ""
 
 
 def _review(

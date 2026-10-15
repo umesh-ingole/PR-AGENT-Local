@@ -34,9 +34,9 @@ def _mock_graph_setup(monkeypatch):
     )
     monkeypatch.setattr(graph, "rag_node", lambda _state: {"context": "", "log": []})
     monkeypatch.setattr(
-        graph,
-        "finalize_node",
-        lambda _state: {"summary": "done", "log": ["finalized"]},
+        agents,
+        "write_summary_with_provider",
+        lambda _state: ("done", "mock"),
     )
 
 
@@ -76,12 +76,15 @@ def test_provider_exception_falls_back_once_then_finishes_with_unscored_warning(
     assert calls == {"gemini": 2, "ollama": 2}
     assert result["score"] == 100
     assert result["raw_penalty"] == 0
-    assert result["passed"] is True
+    assert result["passed"] is False
+    assert result["review_incomplete"] is True
     assert len(warnings) == 1
     assert warnings[0]["evidence"] == "tool"
     assert warnings[0]["agent"] == "llm-unavailable"
     assert "provider=gemini error=TimeoutError" in warnings[0]["detail"]
     assert "provider=ollama error=ConnectionError" in warnings[0]["detail"]
+    assert agents.review_incomplete_banner(result) == agents.REVIEW_INCOMPLETE_BANNER
+    assert agents.REVIEW_INCOMPLETE_BANNER in result["log"]
     assert coder_calls == []
     assert "provider=gemini error=TimeoutError" in caplog.text
     assert "provider=ollama error=ConnectionError" in caplog.text
@@ -110,10 +113,28 @@ def test_invalid_reply_twice_finishes_without_scoring_or_fixing_warning(monkeypa
     assert len(calls) == 4
     assert result["score"] == 100
     assert result["raw_penalty"] == 0
-    assert result["passed"] is True
+    assert result["passed"] is False
+    assert result["review_incomplete"] is True
     assert warning["evidence"] == "tool"
     assert warning["agent"] == "llm-unavailable"
     assert "InvalidJSON" in warning["detail"]
+    assert coder_calls == []
+
+
+def test_successful_agents_leave_review_complete_without_banner(monkeypatch):
+    _mock_graph_setup(monkeypatch)
+    monkeypatch.setattr(agents, "call_llm", lambda *_args: ("[]", "mock"))
+    coder_calls = []
+    monkeypatch.setattr(
+        agents, "coder_agent", lambda state: coder_calls.append(state) or {}
+    )
+
+    result = graph.build_graph().invoke(_initial_state())
+
+    assert result["passed"] is True
+    assert result["review_incomplete"] is False
+    assert agents.review_incomplete_banner(result) == ""
+    assert agents.REVIEW_INCOMPLETE_BANNER not in result["log"]
     assert coder_calls == []
 
 
@@ -228,10 +249,14 @@ def test_summary_provider_exception_uses_fallback_and_adds_report_warning(monkey
     result = graph.finalize_node(state)
 
     assert result["summary"].startswith("Final score 80/100")
+    assert result["review_incomplete"] is True
+    assert result["passed"] is False
     assert result["merged"][0] == state["merged"][0]
     warning = result["merged"][1]
     assert warning["title"] == "LLM unavailable"
     assert warning["evidence"] == "tool"
     assert "provider=ollama error=TimeoutError" in warning["detail"]
     assert result["response_errors"] == [warning]
+    assert warning["stage"] == "Summary Agent"
+    assert agents.review_incomplete_banner(result) == agents.REVIEW_INCOMPLETE_BANNER
     assert any("LLM unavailable" in line for line in result["log"])

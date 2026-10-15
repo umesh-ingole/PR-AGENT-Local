@@ -4,6 +4,7 @@ import os
 
 import streamlit as st
 
+import agents
 from config import (EXT_TO_LANG, LANG_LABEL, MAX_ITERATIONS, PASS_SCORE,
                     SEVERITIES, load_streamlit_secrets)
 
@@ -35,11 +36,15 @@ def build_report_md(state: dict) -> str:
         if finding.get("agent") in {"llm-unavailable", "agent-response-error"}
     ]
     findings = [finding for finding in state["merged"] if finding not in warnings]
-    lines = [f"# Code review: {state['filename']}", "",
+    lines = [f"# Code review: {state['filename']}"]
+    banner = agents.review_incomplete_banner(state)
+    if banner:
+        lines.extend(["", f"> **{banner}**"])
+    lines.extend(["",
              f"Language: {LANG_LABEL[state['language']]}  ",
              f"Final score: {state['score']}/100  ",
              f"Fix rounds: {state.get('iteration', 0)}", "",
-             "## Summary", state.get("summary", ""), "", "## Findings"]
+             "## Summary", state.get("summary", ""), "", "## Findings"])
     if not findings:
         lines.append("No findings.")
     for f in findings:
@@ -101,7 +106,8 @@ if st.button("Review and fix", type="primary"):
     init = {"filename": filename, "language": language, "original_code": code,
             "current_code": code, "force_local": force_local, "max_iterations": max_rounds,
             "providers": [], "log": [], "score_history": [], "penalty_history": [],
-            "rejected_fix_count": 0, "response_errors": []}
+            "rejected_fix_count": 0, "response_errors": [],
+            "review_incomplete": False}
     final = dict(init)
     try:
         with st.status("Running review pipeline...", expanded=True) as status:
@@ -148,6 +154,9 @@ if result and result["filename"] == filename:
         ["Report", "Original vs fixed", "Static analysis", "Pipeline log"])
 
     with tab_report:
+        banner = agents.review_incomplete_banner(result)
+        if banner:
+            st.warning(banner)
         st.write(result.get("summary", ""))
         warnings = [
             finding for finding in result["merged"]

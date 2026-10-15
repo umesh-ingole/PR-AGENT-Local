@@ -37,6 +37,7 @@ class ReviewState(TypedDict, total=False):
     score: int
     raw_penalty: int
     passed: bool
+    review_incomplete: bool
     stop_no_improvement: bool
     iteration: int
     summary: str
@@ -169,7 +170,12 @@ def _python_validation_errors(candidate_code: str, baseline_errors: list[str]) -
 
 def route_after_summary(state: ReviewState) -> str:
     limit = state.get("max_iterations", 2 if state.get("force_local", False) else MAX_ITERATIONS)
-    if state["passed"] or state.get("stop_no_improvement", False) or state.get("iteration", 0) >= limit:
+    if (
+        state.get("review_incomplete", False)
+        or state["passed"]
+        or state.get("stop_no_improvement", False)
+        or state.get("iteration", 0) >= limit
+    ):
         return "finalize"
     return "coder"
 
@@ -183,6 +189,14 @@ def summary_node(state: ReviewState) -> dict:
     )
     update["raw_penalty"] = raw_penalty
     update["penalty_history"] = [raw_penalty]
+    review_incomplete = state.get("review_incomplete", False) or any(
+        agents._is_incomplete_review_warning(finding)
+        for finding in update["merged"]
+    )
+    update["review_incomplete"] = review_incomplete
+    if review_incomplete:
+        update["passed"] = False
+        update.setdefault("log", []).append(agents.REVIEW_INCOMPLETE_BANNER)
     previous_penalties = state.get("penalty_history", [])
     if previous_penalties and raw_penalty >= previous_penalties[-1]:
         update["stop_no_improvement"] = True
@@ -218,7 +232,10 @@ def finalize_node(state: ReviewState) -> dict:
             "summary": summary,
             "merged": state.get("merged", []) + [warning],
             "response_errors": [warning],
+            "review_incomplete": True,
+            "passed": False,
             "log": [
+                agents.REVIEW_INCOMPLETE_BANNER,
                 f"LLM unavailable: {warning['detail']}",
                 "Report and fixed file ready",
             ],
@@ -234,7 +251,10 @@ def finalize_node(state: ReviewState) -> dict:
         "summary": summary,
         "merged": state.get("merged", []) + [warning],
         "response_errors": [warning],
+        "review_incomplete": True,
+        "passed": False,
         "log": [
+            agents.REVIEW_INCOMPLETE_BANNER,
             f"LLM unavailable: {warning['detail']}",
             "Report and fixed file ready",
         ],
