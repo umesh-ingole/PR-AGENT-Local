@@ -1,6 +1,10 @@
+import ast
+from pathlib import Path
+
 import agents
 import graph
 import llm_gateway
+import run_pipeline
 
 
 def _initial_state():
@@ -40,7 +44,22 @@ def _mock_graph_setup(monkeypatch):
     )
 
 
-def test_provider_exception_falls_back_once_then_finishes_with_unscored_warning(
+def _load_app_report_builder():
+    app_path = Path(agents.__file__).with_name("app.py")
+    app_tree = ast.parse(app_path.read_text(encoding="utf-8"))
+    report_function = next(
+        node for node in app_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "build_report_md"
+    )
+    isolated_module = ast.Module(body=[report_function], type_ignores=[])
+    namespace = {"agents": agents}
+    from config import LANG_LABEL
+    namespace["LANG_LABEL"] = LANG_LABEL
+    exec(compile(isolated_module, str(app_path), "exec"), namespace)
+    return namespace["build_report_md"]
+
+
+def test_both_review_agents_fail_marks_review_incomplete_and_shows_banner(
     monkeypatch, caplog,
 ):
     _mock_graph_setup(monkeypatch)
@@ -83,8 +102,14 @@ def test_provider_exception_falls_back_once_then_finishes_with_unscored_warning(
     assert warnings[0]["agent"] == "llm-unavailable"
     assert "provider=gemini error=TimeoutError" in warnings[0]["detail"]
     assert "provider=ollama error=ConnectionError" in warnings[0]["detail"]
-    assert agents.review_incomplete_banner(result) == agents.REVIEW_INCOMPLETE_BANNER
-    assert agents.REVIEW_INCOMPLETE_BANNER in result["log"]
+    banner = (
+        "Review incomplete: the model was unavailable. "
+        "The score reflects tool checks only."
+    )
+    assert agents.review_incomplete_banner(result) == banner
+    assert banner in result["log"]
+    assert any("Security Agent found 0 issue(s)" in line for line in result["log"])
+    assert any("Bug-Detection Agent found 0 issue(s)" in line for line in result["log"])
     assert coder_calls == []
     assert "provider=gemini error=TimeoutError" in caplog.text
     assert "provider=ollama error=ConnectionError" in caplog.text
@@ -121,7 +146,7 @@ def test_invalid_reply_twice_finishes_without_scoring_or_fixing_warning(monkeypa
     assert coder_calls == []
 
 
-def test_successful_agents_leave_review_complete_without_banner(monkeypatch):
+def test_both_review_agents_succeed_and_no_banner_is_shown(monkeypatch):
     _mock_graph_setup(monkeypatch)
     monkeypatch.setattr(agents, "call_llm", lambda *_args: ("[]", "mock"))
     coder_calls = []
@@ -136,6 +161,55 @@ def test_successful_agents_leave_review_complete_without_banner(monkeypatch):
     assert agents.review_incomplete_banner(result) == ""
     assert agents.REVIEW_INCOMPLETE_BANNER not in result["log"]
     assert coder_calls == []
+
+
+def test_app_report_places_exact_incomplete_banner_near_the_top():
+    warning = agents._llm_unavailable_finding(
+        "Security Agent", "provider=ollama error=TimeoutError"
+    )
+    report = _load_app_report_builder()({
+        "filename": "sample.py",
+        "language": "python",
+        "score": 100,
+        "iteration": 0,
+        "summary": "Tool-only review.",
+        "merged": [warning],
+        "review_incomplete": True,
+        "static_tool": "mock",
+        "static_report": "",
+    })
+
+    banner_line = f"> **{agents.REVIEW_INCOMPLETE_BANNER}**"
+    assert banner_line in report.splitlines()[:4]
+
+
+def test_coder_failure_alone_does_not_mark_review_incomplete(monkeypatch):
+    warning = agents._llm_unavailable_finding(
+        "Coder Agent", "provider=ollama error=TimeoutError"
+    )
+    monkeypatch.setattr(
+        agents,
+        "summary_agent",
+        lambda _state: {
+            "merged": [warning],
+            "score": 100,
+            "passed": True,
+            "score_history": [100],
+            "log": [],
+        },
+    )
+
+    update = graph.summary_node({
+        "response_errors": [warning],
+        "penalty_history": [],
+        "dropped_finding_counts": [],
+        "dropped_finding_count_index": 0,
+    })
+
+    assert update["review_incomplete"] is False
+    assert update["passed"] is True
+    assert agents.review_incomplete_banner(update) == ""
+    assert agents.REVIEW_INCOMPLETE_BANNER not in update["log"]
 
 
 def test_coder_failure_leaves_source_unchanged_and_records_warning(monkeypatch):
@@ -163,6 +237,7 @@ def test_coder_failure_leaves_source_unchanged_and_records_warning(monkeypatch):
     })
 
     assert result["current_code"] == source
+    assert result.get("review_incomplete", False) is False
     assert result["response_errors"][0]["title"] == "LLM unavailable"
     assert result["response_errors"][0]["evidence"] == "tool"
     assert "provider=ollama error=TimeoutError" in result["response_errors"][0]["detail"]
@@ -260,3 +335,46 @@ def test_summary_provider_exception_uses_fallback_and_adds_report_warning(monkey
     assert warning["stage"] == "Summary Agent"
     assert agents.review_incomplete_banner(result) == agents.REVIEW_INCOMPLETE_BANNER
     assert any("LLM unavailable" in line for line in result["log"])
+
+
+def test_run_pipeline_prints_exact_incomplete_banner_at_final_report(
+    tmp_path, monkeypatch, capsys,
+):
+    project_dir = tmp_path / "project"
+    sample_dir = project_dir / "sample"
+    sample_dir.mkdir(parents=True)
+    (sample_dir / "buggy_sample.py").write_text("print('offline')\n", encoding="utf-8")
+    run_dir = project_dir / "runs" / "offline-run"
+    run_dir.parent.mkdir()
+    run_dir.mkdir()
+    warning = agents._llm_unavailable_finding(
+        "Bug Agent", "provider=ollama error=TimeoutError"
+    )
+
+    class FakeGraph:
+        def stream(self, _initial, stream_mode):
+            assert stream_mode == "updates"
+            yield {
+                "summary": {
+                    "score": 100,
+                    "raw_penalty": 0,
+                    "passed": False,
+                    "review_incomplete": True,
+                    "merged": [warning],
+                    "iteration": 0,
+                    "log": [],
+                }
+            }
+            yield {"finalize": {"summary": "Tool-only review.", "log": []}}
+
+    monkeypatch.setattr(run_pipeline, "__file__", str(project_dir / "run_pipeline.py"))
+    monkeypatch.setattr(run_pipeline, "create_run_directory", lambda _path: run_dir)
+    monkeypatch.setattr(run_pipeline, "build_graph", FakeGraph)
+    monkeypatch.setattr(
+        run_pipeline, "static_analysis_mode", lambda: "direct calls (USE_MCP=0)"
+    )
+
+    run_pipeline.main([])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert agents.REVIEW_INCOMPLETE_BANNER in lines
