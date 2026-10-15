@@ -182,6 +182,7 @@ def security_agent(state: dict) -> dict:
     findings, providers, retried, dropped = _review(SECURITY_SYSTEM, "security-agent", state)
     retry_note = "; retried invalid JSON once" if retried else ""
     return {"security_findings": findings, "providers": providers,
+        "dropped_finding_counts": [dropped],
         "log": [f"Security Agent found {len(findings)} issue(s) via {', '.join(providers)}{retry_note}",
             f"Security Agent dropped {dropped} finding(s) as unverified"]}
 
@@ -190,6 +191,7 @@ def bug_agent(state: dict) -> dict:
     findings, providers, retried, dropped = _review(BUG_SYSTEM, "bug-agent", state)
     retry_note = "; retried invalid JSON once" if retried else ""
     return {"bug_findings": findings, "providers": providers,
+        "dropped_finding_counts": [dropped],
         "log": [f"Bug-Detection Agent found {len(findings)} issue(s) via {', '.join(providers)}{retry_note}",
             f"Bug-Detection Agent dropped {dropped} finding(s) as unverified"]}
 

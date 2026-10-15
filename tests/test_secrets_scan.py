@@ -113,3 +113,46 @@ def test_summary_includes_scanner_finding_without_llm_call(monkeypatch):
     assert result["merged"] == [finding]
     assert result["score"] == 80
     assert result["passed"] is False
+
+
+def test_graph_merges_deterministic_secret_when_review_agents_return_no_findings(
+    monkeypatch,
+):
+    source = 'API_KEY = "sk-live-123"\n'
+
+    monkeypatch.setattr(graph, "run_static_analysis", lambda *_args: ("pylint", ""))
+    monkeypatch.setattr(graph, "retrieve_context", lambda *_args: "")
+    monkeypatch.setattr(graph, "run_pylint_errors_only", lambda _code: [])
+
+    def mocked_call_llm(system, _user, _force_local=False):
+        if system == agents.CODER_SYSTEM:
+            return f"```python\n{source}```", "mock"
+        return "[]", "mock"
+
+    monkeypatch.setattr(agents, "call_llm", mocked_call_llm)
+    monkeypatch.setattr(
+        agents, "write_summary_with_provider", lambda _state: ("summary", "mock")
+    )
+
+    final_state = graph.build_graph().invoke({
+        "filename": "sample.py",
+        "language": "python",
+        "original_code": source,
+        "current_code": source,
+        "force_local": True,
+        "max_iterations": 2,
+        "providers": [],
+        "log": [],
+        "score_history": [],
+        "penalty_history": [],
+        "rejected_fix_count": 0,
+        "dropped_finding_counts": [],
+        "dropped_unverified_history": [],
+        "dropped_finding_count_index": 0,
+    })
+
+    assert all(
+        finding["agent"] == "secrets-scan"
+        for finding in final_state["merged"]
+    )
+    assert len(final_state["merged"]) == 1

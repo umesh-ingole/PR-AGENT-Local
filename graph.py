@@ -44,6 +44,9 @@ class ReviewState(TypedDict, total=False):
     score_history: Annotated[list, operator.add]
     penalty_history: Annotated[list, operator.add]
     rejected_fix_count: Annotated[int, operator.add]
+    dropped_finding_counts: Annotated[list, operator.add]
+    dropped_unverified_history: Annotated[list, operator.add]
+    dropped_finding_count_index: int
 
 
 def static_node(state: ReviewState) -> dict:
@@ -162,6 +165,12 @@ def summary_node(state: ReviewState) -> dict:
         )
     else:
         update["stop_no_improvement"] = False
+    dropped_counts = state.get("dropped_finding_counts", [])
+    previous_index = state.get("dropped_finding_count_index", 0)
+    round_dropped = sum(dropped_counts[previous_index:])
+    update["dropped_finding_count_index"] = len(dropped_counts)
+    update["dropped_unverified_count"] = round_dropped
+    update["dropped_unverified_history"] = [round_dropped]
     return update
 
 

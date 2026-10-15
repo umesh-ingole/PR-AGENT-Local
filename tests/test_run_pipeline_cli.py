@@ -10,11 +10,21 @@ def test_pipeline_defaults_to_local_only_with_two_rounds():
 
 
 def test_cloud_flag_selects_gemini_fallback_and_three_rounds():
-    settings = pipeline_settings(parse_args(["--cloud"]).cloud)
+    args = parse_args(["--cloud"])
+    settings = pipeline_settings(args.cloud, args.no_fallback)
 
     assert settings["force_local"] is False
     assert settings["max_iterations"] == 3
     assert settings["provider_order"] == "gemini,ollama"
+
+
+def test_no_fallback_selects_only_gemini_for_cloud_runs():
+    args = parse_args(["--cloud", "--no-fallback"])
+    settings = pipeline_settings(args.cloud, args.no_fallback)
+
+    assert settings["force_local"] is False
+    assert settings["provider_order"] == "gemini"
+    assert settings["no_fallback"] is True
 
 
 def test_cloud_warns_when_google_api_key_is_unset(monkeypatch):
@@ -24,6 +34,16 @@ def test_cloud_warns_when_google_api_key_is_unset(monkeypatch):
 
     assert warning == (
         "GOOGLE_API_KEY not set: --cloud will fall back to the local model and be slow."
+    )
+
+
+def test_cloud_no_fallback_warns_that_missing_key_will_not_use_ollama(monkeypatch):
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    warning = cloud_startup_warning(cloud=True, no_fallback=True)
+
+    assert warning == (
+        "GOOGLE_API_KEY not set: --cloud --no-fallback cannot call Gemini."
     )
 
 

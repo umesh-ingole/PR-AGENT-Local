@@ -295,6 +295,39 @@ def test_force_local_true_never_passes_coder_runs_exactly_twice(monkeypatch):
     assert calls[-1] == "finalize"
 
 
+def test_summary_records_new_unverified_drop_count_per_round(monkeypatch):
+    monkeypatch.setattr(
+        graph.agents,
+        "summary_agent",
+        lambda _state: {
+            "score": 100,
+            "passed": True,
+            "merged": [],
+            "score_history": [100],
+            "log": [],
+        },
+    )
+    state = {
+        "penalty_history": [],
+        "dropped_finding_counts": [2, 1],
+        "dropped_finding_count_index": 0,
+    }
+
+    first = graph.summary_node(state)
+    assert first["dropped_unverified_count"] == 3
+    assert first["dropped_unverified_history"] == [3]
+    assert first["dropped_finding_count_index"] == 2
+
+    second = graph.summary_node({
+        **state,
+        "penalty_history": [0],
+        "dropped_finding_counts": [2, 1, 4],
+        "dropped_finding_count_index": 2,
+    })
+    assert second["dropped_unverified_count"] == 4
+    assert second["dropped_unverified_history"] == [4]
+
+
 def test_first_round_does_not_stop_without_previous_penalty(monkeypatch):
     monkeypatch.setattr(
         graph.agents,

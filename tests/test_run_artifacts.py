@@ -16,6 +16,7 @@ def test_run_artifacts_save_round_findings_and_unified_diff(tmp_path):
         "score": 72,
         "raw_penalty": 28,
         "passed": False,
+        "dropped_unverified_count": 3,
         "merged": [{"line": 1, "severity": "medium", "title": "Example"}],
     }
     findings_path = save_round_findings(tmp_path, 1, update)
@@ -24,6 +25,7 @@ def test_run_artifacts_save_round_findings_and_unified_diff(tmp_path):
     assert findings["round"] == 1
     assert findings["score"] == 72
     assert findings["raw_penalty"] == 28
+    assert findings["dropped_unverified_count"] == 3
     assert findings["findings"] == update["merged"]
 
     original = "value = 1\n"
@@ -52,6 +54,8 @@ def test_run_info_records_run_metadata_without_environment_secrets(tmp_path, mon
         "providers": ["gemini", "ollama", "gemini"],
         "penalty_history": [124, 80, 10],
         "rejected_fix_count": 2,
+        "llm_call_count": 7,
+        "dropped_unverified_history": [4, 1, 0],
     }
 
     run_info = build_run_info(
@@ -73,6 +77,8 @@ def test_run_info_records_run_metadata_without_environment_secrets(tmp_path, mon
     assert saved["termination_reason"] == "passed"
     assert saved["raw_penalty_history"] == [124, 80, 10]
     assert saved["rejected_fix_count"] == 2
+    assert saved["llm_call_count"] == 7
+    assert saved["dropped_unverified_history"] == [4, 1, 0]
     assert secret not in contents
     assert "GOOGLE_API_KEY" not in contents
 

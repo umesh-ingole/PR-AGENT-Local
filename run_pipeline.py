@@ -9,6 +9,7 @@ from pathlib import Path
 
 from config import EXT_TO_LANG, MAX_ITERATIONS
 from graph import build_graph
+import llm_gateway
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -18,20 +19,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Use Gemini first with Ollama fallback and allow three fix rounds.",
     )
+    parser.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="With --cloud, do not fall back to Ollama if Gemini fails.",
+    )
     return parser.parse_args(argv)
 
 
-def pipeline_settings(cloud: bool) -> dict:
+def pipeline_settings(cloud: bool, no_fallback: bool = False) -> dict:
+    provider_order = "gemini" if cloud and no_fallback else "gemini,ollama" if cloud else "ollama"
+    mode = (
+        "cloud (Gemini only)" if cloud and no_fallback
+        else "cloud (Gemini first, Ollama fallback)" if cloud
+        else "local-only (Ollama)"
+    )
     return {
         "force_local": not cloud,
         "max_iterations": MAX_ITERATIONS if cloud else 2,
-        "provider_order": "gemini,ollama" if cloud else "ollama",
-        "mode": "cloud (Gemini first, Ollama fallback)" if cloud else "local-only (Ollama)",
+        "provider_order": provider_order,
+        "mode": mode,
+        "no_fallback": cloud and no_fallback,
     }
 
 
-def cloud_startup_warning(cloud: bool) -> str | None:
+def cloud_startup_warning(cloud: bool, no_fallback: bool = False) -> str | None:
     if cloud and not os.getenv("GOOGLE_API_KEY"):
+        if no_fallback:
+            return "GOOGLE_API_KEY not set: --cloud --no-fallback cannot call Gemini."
         return "GOOGLE_API_KEY not set: --cloud will fall back to the local model and be slow."
     return None
 
@@ -50,6 +65,7 @@ def save_round_findings(run_dir: Path, round_number: int, update: dict) -> Path:
             "score": update["score"],
             "raw_penalty": update["raw_penalty"],
             "passed": update.get("passed", False),
+            "dropped_unverified_count": update.get("dropped_unverified_count", 0),
             "findings": update.get("merged", []),
         }, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -78,6 +94,10 @@ def build_run_info(
         "termination_reason": termination_reason,
         "raw_penalty_history": list(final_state.get("penalty_history", [])),
         "rejected_fix_count": final_state.get("rejected_fix_count", 0),
+        "llm_call_count": final_state.get("llm_call_count", 0),
+        "dropped_unverified_history": list(
+            final_state.get("dropped_unverified_history", [])
+        ),
     }
 
 
@@ -116,11 +136,14 @@ def save_final_artifacts(run_dir: Path, filename: str, original: str, fixed: str
 
 
 def main(argv: list[str] | None = None) -> None:
-    settings = pipeline_settings(parse_args(argv).cloud)
+    args = parse_args(argv)
+    settings = pipeline_settings(args.cloud, args.no_fallback)
     if not settings["force_local"]:
         os.environ["LLM_PROVIDERS"] = settings["provider_order"]
     print(f"Mode: {settings['mode']}; max_iterations={settings['max_iterations']}")
-    warning = cloud_startup_warning(not settings["force_local"])
+    warning = cloud_startup_warning(
+        not settings["force_local"], settings["no_fallback"]
+    )
     if warning:
         print(f"Warning: {warning}")
 
@@ -135,6 +158,30 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Saving run artifacts to: {run_dir}")
     start_time = datetime.now(timezone.utc).isoformat()
     started = time.perf_counter()
+    llm_call_count = 0
+
+    def observe_llm_call(
+        stage: str,
+        provider: str,
+        model: str,
+        duration: float,
+        success: bool | None,
+    ) -> None:
+        nonlocal llm_call_count
+        if stage == "start":
+            llm_call_count += 1
+            print(
+                f"[{time.perf_counter() - started:7.2f}s] "
+                f"LLM call {llm_call_count} started: {provider}/{model}"
+            )
+        else:
+            outcome = "success" if success else "failed"
+            print(
+                f"[{time.perf_counter() - started:7.2f}s] "
+                f"LLM call finished: {provider}/{model}; {outcome}; "
+                f"call elapsed {duration:.2f}s"
+            )
+
     initial = {
         "filename": filename,
         "language": language,
@@ -147,9 +194,13 @@ def main(argv: list[str] | None = None) -> None:
         "score_history": [],
         "penalty_history": [],
         "rejected_fix_count": 0,
+        "dropped_finding_counts": [],
+        "dropped_unverified_history": [],
+        "dropped_finding_count_index": 0,
     }
     final = dict(initial)
     score_round = 0
+    previous_observer = llm_gateway.set_call_observer(observe_llm_call)
     try:
         graph = build_graph()
         for chunk in graph.stream(initial, stream_mode="updates"):
@@ -170,9 +221,11 @@ def main(argv: list[str] | None = None) -> None:
                 for key, value in update.items():
                     if key in (
                         "providers", "log", "score_history", "penalty_history",
-                        "rejected_fix_count",
+                        "rejected_fix_count", "dropped_finding_counts",
+                        "dropped_unverified_history",
                     ):
-                        final[key] = final.get(key, [] if key != "rejected_fix_count" else 0) + value
+                        default = 0 if key == "rejected_fix_count" else []
+                        final[key] = final.get(key, default) + value
                     else:
                         final[key] = value
 
@@ -181,16 +234,26 @@ def main(argv: list[str] | None = None) -> None:
     except Exception:
         elapsed = time.perf_counter() - started
         save_run_info(
-            run_dir,
-            build_run_info(settings, final, start_time, elapsed, "error"),
+            run_dir, build_run_info(
+                settings,
+                {**final, "llm_call_count": llm_call_count},
+                start_time,
+                elapsed,
+                "error",
+            ),
         )
         raise
+    finally:
+        llm_gateway.set_call_observer(previous_observer)
 
     elapsed = time.perf_counter() - started
     reason = termination_reason(final, settings["max_iterations"])
     save_run_info(
         run_dir,
-        build_run_info(settings, final, start_time, elapsed, reason),
+        build_run_info(
+            settings, {**final, "llm_call_count": llm_call_count},
+            start_time, elapsed, reason,
+        ),
     )
     print(
         f"\nFinal score: {final['score']}/100; "
