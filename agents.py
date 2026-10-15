@@ -48,7 +48,10 @@ CODER_SYSTEM = (
     "shell=True from subprocess, split string commands with shlex.split and "
     "keep returning the same object type as before. Do not add check=True or "
     "other new exception-raising arguments to existing calls. Do not add new "
-    "input restrictions or validation. Do not change the input format a function "
+    "input restrictions or validation. For a mutable default, use None and "
+    "create the object inside the function, preserving behavior for callers. "
+    "For a bare except or except Exception handler that only passes, catch the "
+    "specific exceptions the code can raise. Do not change the input format a function "
     "accepts, for example replacing eval with json.loads changes accepted syntax; "
     "if the finding requires it, use ast.literal_eval, which accepts the same "
     "Python-literal syntax. Make the smallest change that removes the problem. "
@@ -337,7 +340,13 @@ def merge_and_score(
             best.append(f)
             continue
         group = [best[index] for index in duplicates] + [f]
-        strongest = min(group, key=lambda item: SEVERITIES.index(item["severity"]))
+        strongest = min(
+            group,
+            key=lambda item: (
+                SEVERITIES.index(item["severity"]),
+                0 if item.get("agent") in {"ast-scan", "secrets-scan"} else 1,
+            ),
+        )
         first_duplicate = duplicates[0]
         best[first_duplicate] = strongest
         for index in reversed(duplicates[1:]):
@@ -352,7 +361,8 @@ def merge_and_score(
 def summary_agent(state: dict) -> dict:
     merged, score, passed = merge_and_score(
         state.get("security_findings", []), state.get("bug_findings", []),
-        state.get("secret_findings", []), state.get("interface_findings", []))
+        state.get("secret_findings", []) + state.get("ast_findings", []),
+        state.get("interface_findings", []))
     return {
         "merged": merged, "score": score, "passed": passed,
         "score_history": [score],
@@ -362,7 +372,11 @@ def summary_agent(state: dict) -> dict:
 
 
 def coder_agent(state: dict) -> dict:
-    to_fix = [f for f in state["merged"] if f["severity"] in ("critical", "high", "medium")] or state["merged"]
+    to_fix = [
+        finding for finding in state["merged"]
+        if finding["severity"] in ("critical", "high", "medium")
+        or finding.get("agent") in {"ast-scan", "secrets-scan"}
+    ] or state["merged"]
     listing = "\n".join(
         f"- line {f['line']}: [{f['severity']}] {f['title']} - {f['detail']}" for f in to_fix)
     user = f"Language: {state['language']}\n\nFINDINGS TO FIX:\n{listing}\n\nFILE:\n{state['current_code']}"

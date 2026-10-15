@@ -3,6 +3,7 @@
 Plain functions. mcp_server.py exposes them over MCP; static_analysis.py calls
 them either through MCP or directly.
 """
+import ast
 import os
 import re
 import shutil
@@ -128,6 +129,164 @@ def scan_secrets(code: str) -> list[dict]:
             )
 
     return [findings_by_line[line] for line in sorted(findings_by_line)]
+
+
+def scan_python_patterns(code: str) -> list[dict]:
+    """Find selected Python code patterns using syntax only, without inference."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    source_lines = code.splitlines()
+    findings: dict[tuple[int, str], dict] = {}
+
+    def add(node: ast.AST, severity: str, title: str, detail: str) -> None:
+        line = getattr(node, "lineno", None)
+        if not isinstance(line, int) or not 1 <= line <= len(source_lines):
+            return
+        findings.setdefault((line, title), {
+            "line": line,
+            "severity": severity,
+            "title": title,
+            "detail": detail,
+            "code": source_lines[line - 1],
+            "evidence": "tool",
+            "agent": "ast-scan",
+        })
+
+    def is_mutable_default(node: ast.expr) -> bool:
+        return (
+            isinstance(node, (ast.List, ast.Dict, ast.Set, ast.ListComp,
+                              ast.DictComp, ast.SetComp))
+            or (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in {"list", "dict", "set"}
+            )
+        )
+
+    def is_pass_only(handler: ast.ExceptHandler) -> bool:
+        return bool(handler.body) and all(
+            isinstance(statement, ast.Pass) for statement in handler.body
+        )
+
+    def is_open_call(node: ast.Call) -> bool:
+        if isinstance(node.func, ast.Name) and node.func.id == "open":
+            return True
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "open":
+            return False
+        path_factory = node.func.value
+        factory = path_factory.func if isinstance(path_factory, ast.Call) else None
+        return (
+            isinstance(factory, ast.Name)
+            and factory.id == "Path"
+            or isinstance(factory, ast.Attribute)
+            and factory.attr == "Path"
+        )
+
+    def is_inside_with(node: ast.AST) -> bool:
+        parent = parents.get(node)
+        while parent is not None:
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return False
+            if isinstance(parent, (ast.With, ast.AsyncWith)):
+                return True
+            parent = parents.get(parent)
+        return False
+
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defaults = node.args.defaults + [
+                default for default in node.args.kw_defaults if default is not None
+            ]
+            if any(is_mutable_default(default) for default in defaults):
+                add(
+                    node,
+                    "high",
+                    "Mutable default argument",
+                    "A mutable object is used as a function default and may be shared "
+                    "between calls. Use None and create the object inside the function.",
+                )
+        elif isinstance(node, ast.ExceptHandler):
+            if (node.type is None or (
+                isinstance(node.type, ast.Name) and node.type.id == "Exception"
+            )) and is_pass_only(node):
+                add(
+                    node,
+                    "medium",
+                    "Exception silently ignored",
+                    "A bare except or except Exception handler only passes. Catch the "
+                    "specific exceptions this code can raise.",
+                )
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in {"eval", "exec"}:
+                add(
+                    node,
+                    "critical",
+                    f"Use of {node.func.id}()",
+                    f"{node.func.id}() executes dynamically supplied code. Use a "
+                    "constrained parser or an explicitly reviewed alternative.",
+                )
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "os"
+                and node.func.attr == "system"
+            ):
+                add(node, "high", "Use of os.system()", "os.system() invokes a shell command.")
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "pickle"
+                and node.func.attr in {"load", "loads"}
+            ):
+                add(
+                    node, "high", "Unsafe pickle deserialization",
+                    "pickle.load/loads can execute code when deserializing untrusted data.",
+                )
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "yaml"
+                and node.func.attr == "load"
+                and len(node.args) < 2
+                and not any(keyword.arg == "Loader" for keyword in node.keywords)
+            ):
+                add(
+                    node, "high", "Unsafe yaml.load()",
+                    "yaml.load() is called without an explicit Loader.",
+                )
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "subprocess"
+                and node.func.attr in {
+                    "run", "Popen", "call", "check_call", "check_output"
+                }
+                and any(
+                    keyword.arg == "shell"
+                    and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is True
+                    for keyword in node.keywords
+                )
+            ):
+                add(
+                    node, "high", "Shell enabled in subprocess call",
+                    "The subprocess call sets shell=True, enabling shell interpretation.",
+                )
+            elif is_open_call(node) and not is_inside_with(node):
+                add(
+                    node, "medium", "File opened outside a with statement",
+                    "The file handle is opened without an enclosing with statement.",
+                )
+
+    return sorted(findings.values(), key=lambda item: (item["line"], item["title"]))
 
 
 def _run(cmd: list[str]) -> str:

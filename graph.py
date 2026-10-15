@@ -14,7 +14,7 @@ import agents
 from config import MAX_ITERATIONS, SEVERITY_PENALTY
 from rag import retrieve_context
 from static_analysis import run_static_analysis
-from tools import run_pylint_errors_only, scan_secrets
+from tools import run_pylint_errors_only, scan_python_patterns, scan_secrets
 
 
 class ReviewState(TypedDict, total=False):
@@ -27,6 +27,7 @@ class ReviewState(TypedDict, total=False):
     static_tool: str
     static_report: str
     secret_findings: list
+    ast_findings: list
     context: str
     security_findings: list
     bug_findings: list
@@ -53,11 +54,15 @@ def static_node(state: ReviewState) -> dict:
     code = state["current_code"]
     tool, report = run_static_analysis(state["language"], code)
     secret_findings = scan_secrets(code)
-    report = _append_secret_findings(report, secret_findings)
+    ast_findings = scan_python_patterns(code) if state["language"] == "python" else []
+    report = _append_secret_findings(report, secret_findings + ast_findings)
     log = [f"Static analysis ran {tool}"]
     if secret_findings:
         log.append(f"Secrets scan found {len(secret_findings)} hard-coded credential(s)")
+    if ast_findings:
+        log.append(f"Python AST scan found {len(ast_findings)} pattern(s)")
     return {"static_tool": tool, "static_report": report, "secret_findings": secret_findings,
+            "ast_findings": ast_findings,
             "iteration": 0, "log": log}
 
 
@@ -137,12 +142,16 @@ def coder_node(state: ReviewState) -> dict:
     code = update["current_code"]
     tool, report = run_static_analysis(state["language"], code)
     secret_findings = scan_secrets(code)
-    report = _append_secret_findings(report, secret_findings)
+    ast_findings = scan_python_patterns(code) if state["language"] == "python" else []
+    report = _append_secret_findings(report, secret_findings + ast_findings)
     update.update({"static_tool": tool, "static_report": report,
-                   "secret_findings": secret_findings})
+                   "secret_findings": secret_findings, "ast_findings": ast_findings})
     if secret_findings:
         update.setdefault("log", []).append(
             f"Secrets scan found {len(secret_findings)} hard-coded credential(s)")
+    if ast_findings:
+        update.setdefault("log", []).append(
+            f"Python AST scan found {len(ast_findings)} pattern(s)")
     return update
 
 
