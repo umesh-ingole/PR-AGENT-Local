@@ -30,17 +30,25 @@ def get_graph():
 
 
 def build_report_md(state: dict) -> str:
+    warnings = [
+        finding for finding in state["merged"]
+        if finding.get("agent") in {"llm-unavailable", "agent-response-error"}
+    ]
+    findings = [finding for finding in state["merged"] if finding not in warnings]
     lines = [f"# Code review: {state['filename']}", "",
              f"Language: {LANG_LABEL[state['language']]}  ",
              f"Final score: {state['score']}/100  ",
              f"Fix rounds: {state.get('iteration', 0)}", "",
              "## Summary", state.get("summary", ""), "", "## Findings"]
-    if not state["merged"]:
+    if not findings:
         lines.append("No findings.")
-    for f in state["merged"]:
+    for f in findings:
         loc = f"line {f['line']}" if f["line"] else "general"
         lines.append(f"- **{f['severity'].upper()}** ({loc}, {f['agent']}, evidence: {f['evidence']}) "
                      f"{f['title']}: {f['detail']}")
+    if warnings:
+        lines += ["", "## Warnings"]
+        lines.extend(f"- **Warning:** {finding['detail']}" for finding in warnings)
     lines += ["", f"## Static analysis ({state['static_tool']})", "```", state["static_report"], "```"]
     return "\n".join(lines)
 
@@ -120,7 +128,14 @@ if st.button("Review and fix", type="primary"):
 result = st.session_state.get("result")
 if result and result["filename"] == filename:
     st.divider()
-    counts = {s: sum(1 for f in result["merged"] if f["severity"] == s) for s in SEVERITIES}
+    counts = {
+        severity: sum(
+            1 for finding in result["merged"]
+            if finding["severity"] == severity
+            and finding.get("agent") not in {"llm-unavailable", "agent-response-error"}
+        )
+        for severity in SEVERITIES
+    }
     cols = st.columns(5)
     cols[0].metric("Score", f"{result['score']}/100")
     for col, s in zip(cols[1:], SEVERITIES):
@@ -134,13 +149,20 @@ if result and result["filename"] == filename:
 
     with tab_report:
         st.write(result.get("summary", ""))
-        for f in result["merged"]:
+        warnings = [
+            finding for finding in result["merged"]
+            if finding.get("agent") in {"llm-unavailable", "agent-response-error"}
+        ]
+        findings = [finding for finding in result["merged"] if finding not in warnings]
+        for warning in warnings:
+            st.warning(f"{warning['title']}: {warning['detail']}")
+        for f in findings:
             loc = f"line {f['line']}" if f["line"] else "general"
             with st.expander(f"{SEV_ICON[f['severity']]} {f['title']} ({loc})"):
                 st.write(f["detail"])
                 st.caption(f"Found by {f['agent']} · evidence: {f['evidence']}")
-        if not result["merged"]:
-            st.success("No findings remain.")
+        if not findings:
+            st.success("No actionable findings remain.")
 
     with tab_diff:
         diff = "".join(difflib.unified_diff(

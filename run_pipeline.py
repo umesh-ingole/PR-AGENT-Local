@@ -68,6 +68,10 @@ def save_round_findings(run_dir: Path, round_number: int, update: dict) -> Path:
             "passed": update.get("passed", False),
             "dropped_unverified_count": update.get("dropped_unverified_count", 0),
             "findings": update.get("merged", []),
+            "warnings": [
+                finding for finding in update.get("merged", [])
+                if finding.get("agent") in {"llm-unavailable", "agent-response-error"}
+            ],
         }, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
@@ -265,10 +269,18 @@ def main(argv: list[str] | None = None) -> None:
         f"raw penalty: {final['raw_penalty']}"
     )
     print("Final findings:")
-    if final["merged"]:
-        print(json.dumps(final["merged"], indent=2, ensure_ascii=False))
+    warnings = [
+        finding for finding in final["merged"]
+        if finding.get("agent") in {"llm-unavailable", "agent-response-error"}
+    ]
+    findings = [finding for finding in final["merged"] if finding not in warnings]
+    if findings:
+        print(json.dumps(findings, indent=2, ensure_ascii=False))
     else:
         print("No findings.")
+    if warnings:
+        print("Warnings:")
+        print(json.dumps(warnings, indent=2, ensure_ascii=False))
     print(f"Final fixed file: {fixed_path}")
     print(f"Unified diff: {diff_path}")
     print(f"\nTotal elapsed: {elapsed:.2f} seconds")

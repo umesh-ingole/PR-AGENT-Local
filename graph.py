@@ -176,7 +176,11 @@ def route_after_summary(state: ReviewState) -> str:
 
 def summary_node(state: ReviewState) -> dict:
     update = agents.summary_agent(state)
-    raw_penalty = sum(SEVERITY_PENALTY[f["severity"]] for f in update["merged"])
+    raw_penalty = sum(
+        SEVERITY_PENALTY[f["severity"]]
+        for f in update["merged"]
+        if f.get("agent") not in {"llm-unavailable", "agent-response-error"}
+    )
     update["raw_penalty"] = raw_penalty
     update["penalty_history"] = [raw_penalty]
     previous_penalties = state.get("penalty_history", [])
@@ -198,12 +202,43 @@ def summary_node(state: ReviewState) -> dict:
 
 
 def finalize_node(state: ReviewState) -> dict:
-    summary, provider = agents.write_summary_with_provider(state)
+    try:
+        summary, provider = agents.write_summary_with_provider(state)
+    except Exception as exc:
+        provider_details = agents._provider_failure_detail(
+            exc, state.get("force_local", False)
+        )
+        warning = agents._llm_unavailable_finding(
+            "Summary Agent",
+            f"Summary Agent could not generate the LLM summary; {provider_details}. "
+            "A deterministic summary was used.",
+        )
+        summary = agents._fallback_summary(state)
+        return {
+            "summary": summary,
+            "merged": state.get("merged", []) + [warning],
+            "response_errors": [warning],
+            "log": [
+                f"LLM unavailable: {warning['detail']}",
+                "Report and fixed file ready",
+            ],
+        }
     if provider:
         summary_log = f"Summary report generated via {provider}"
-    else:
-        summary_log = "Summary report generated with deterministic fallback; no LLM provider succeeded"
-    return {"summary": summary, "log": [summary_log, "Report and fixed file ready"]}
+        return {"summary": summary, "log": [summary_log, "Report and fixed file ready"]}
+    warning = agents._llm_unavailable_finding(
+        "Summary Agent",
+        "Summary Agent returned no provider; a deterministic summary was used.",
+    )
+    return {
+        "summary": summary,
+        "merged": state.get("merged", []) + [warning],
+        "response_errors": [warning],
+        "log": [
+            f"LLM unavailable: {warning['detail']}",
+            "Report and fixed file ready",
+        ],
+    }
 
 
 def route_rag_node(state: ReviewState) -> str:

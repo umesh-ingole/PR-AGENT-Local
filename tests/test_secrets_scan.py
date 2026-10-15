@@ -82,6 +82,7 @@ def test_static_and_coder_nodes_refresh_secret_findings(monkeypatch):
     initial_code = 'API_KEY = "sk-live-123"\n'
     fixed_code = 'import os\nAPI_KEY = os.getenv("API_KEY")\n'
     monkeypatch.setattr(graph, "run_static_analysis", lambda *_args: ("pylint", "lint output"))
+    monkeypatch.setattr(graph, "run_pylint_errors_only", lambda _code: [])
 
     initial = graph.static_node({"language": "python", "current_code": initial_code})
     assert len(initial["secret_findings"]) == 1
@@ -129,18 +130,31 @@ def test_summary_includes_agent_response_error_alongside_scanner_findings():
         "evidence": "reasoning",
         "agent": "agent-response-error",
     }
+    unavailable = agents._llm_unavailable_finding(
+        "Bug Agent", "provider=ollama error=TimeoutError"
+    )
     result = agents.summary_agent({
         "security_findings": [],
         "bug_findings": [],
         "secret_findings": secret,
         "ast_findings": ast_findings,
-        "response_errors": [response_error],
+        "response_errors": [response_error, unavailable],
         "interface_findings": [],
     })
 
     assert response_error in result["merged"]
+    assert unavailable in result["merged"]
     assert secret[0] in result["merged"]
     assert ast_findings[0] in result["merged"]
+    baseline = agents.summary_agent({
+        "security_findings": [],
+        "bug_findings": [],
+        "secret_findings": secret,
+        "ast_findings": ast_findings,
+        "interface_findings": [],
+    })
+    assert result["score"] == baseline["score"]
+    assert result["passed"] == baseline["passed"]
 
 
 def test_graph_merges_deterministic_secret_when_review_agents_return_no_findings(

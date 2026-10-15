@@ -1,7 +1,13 @@
 from pathlib import Path
 
 import graph
+import pytest
 from run_pipeline import pipeline_settings
+
+
+@pytest.fixture(autouse=True)
+def mock_pylint_validation(monkeypatch):
+    monkeypatch.setattr(graph, "run_pylint_errors_only", lambda _code: [])
 
 
 def _make_state(force_local: bool, max_iterations: int = 2):
@@ -608,6 +614,7 @@ def test_cloud_three_rounds_record_only_summary_scores_and_findings(monkeypatch)
     result = graph.build_graph().invoke(initial)
 
     assert result["score_history"] == [50, 60, 70]
+    assert len(result["score_history"]) == calls["summary"]
     assert calls == {"security": 3, "bug": 3, "summary": 3}
     assert result["merged"] == [security_finding, bug_finding]
     assert result["log"].count("security emitted") == 3

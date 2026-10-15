@@ -39,7 +39,7 @@ def test_ollama_invalid_json_gets_one_strict_retry(monkeypatch):
     assert "via ollama, ollama" in result["log"][0]
 
 
-def test_second_invalid_ollama_response_becomes_explicit_response_error(monkeypatch):
+def test_second_invalid_ollama_response_becomes_unscored_warning(monkeypatch):
     calls = []
 
     def fake_call_llm(system, user, force_local):
@@ -56,12 +56,13 @@ def test_second_invalid_ollama_response_becomes_explicit_response_error(monkeypa
     assert "Expecting value (line 1, column 1)" in calls[1][1]
     assert result["bug_findings"] == []
     assert len(result["response_errors"]) == 1
-    error = result["response_errors"][0]
-    assert error["severity"] == "high"
-    assert error["agent"] == "agent-response-error"
-    assert "after one retry" in error["detail"]
-    assert error["detail"].count("Response is not valid JSON") == 2
-    assert any("response error" in line.lower() for line in result["log"])
+    warning = result["response_errors"][0]
+    assert warning["title"] == "LLM unavailable"
+    assert warning["evidence"] == "tool"
+    assert warning["agent"] == "llm-unavailable"
+    assert "after one retry" in warning["detail"]
+    assert "InvalidJSON" in warning["detail"]
+    assert any("LLM unavailable" in line for line in result["log"])
 
 
 def test_valid_empty_retry_is_not_reported_as_response_error(monkeypatch):

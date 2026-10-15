@@ -2,6 +2,7 @@
 import ast
 import difflib
 import json
+import os
 import re
 
 from config import PASS_SCORE, SEVERITIES, SEVERITY_PENALTY
@@ -168,16 +169,44 @@ def _verified_findings(items: list[dict], code: str) -> tuple[list[dict], int]:
     return verified, len(items) - len(verified)
 
 
-def _agent_response_error(agent: str, detail: str) -> dict:
+def _provider_failure_detail(
+    exc: Exception, force_local: bool, attempted_providers: list[str] | None = None,
+) -> str:
+    failures = getattr(exc, "failures", ())
+    if failures:
+        return "; ".join(
+            f"provider={provider} error={error_type}"
+            for provider, error_type in failures
+        )
+    providers = attempted_providers or (
+        ["ollama"] if force_local else [
+            provider.strip()
+            for provider in os.getenv("LLM_PROVIDERS", "gemini,ollama").split(",")
+            if provider.strip()
+        ][:2]
+    )
+    if not providers:
+        providers = ["unknown"]
+    return "; ".join(
+        f"provider={provider} error={type(exc).__name__}"
+        for provider in providers
+    )
+
+
+def _llm_unavailable_finding(agent: str, detail: str) -> dict:
     return {
         "line": None,
-        "severity": "high",
-        "title": f"{agent.replace('-', ' ').title()} response error",
+        "severity": "low",
+        "title": "LLM unavailable",
         "detail": detail,
         "code": "",
-        "evidence": "reasoning",
-        "agent": "agent-response-error",
+        "evidence": "tool",
+        "agent": "llm-unavailable",
     }
+
+
+def _is_llm_warning(finding: dict) -> bool:
+    return finding.get("agent") in {"llm-unavailable", "agent-response-error"}
 
 
 def _review(
@@ -192,16 +221,12 @@ def _review(
     try:
         text, provider = call_llm(system, user, state.get("force_local", False))
     except Exception as exc:
-        response_error = _agent_response_error(
-            agent,
-            "The initial model call failed before producing a review response "
-            f"({type(exc).__name__}). No model findings were accepted.",
+        provider_details = _provider_failure_detail(
+            exc, state.get("force_local", False)
         )
-        tool_lines = _report_line_numbers(state.get("static_report", ""))
-        tool_lines.update(
-            finding["line"]
-            for finding in state.get("secret_findings", [])
-            if isinstance(finding.get("line"), int)
+        response_error = _llm_unavailable_finding(
+            agent,
+            f"{agent} could not complete the review; {provider_details}.",
         )
         return [], [], False, 0, response_error
 
@@ -211,6 +236,7 @@ def _review(
         items = _parse_json_array(text)
     except ValueError as first_error:
         retry_error = ""
+        retry_failure_details = ""
         strict_system = (
             system
             + "\n\nSTRICT FORMAT REMINDER: Your previous response was invalid. "
@@ -231,22 +257,32 @@ def _review(
             providers.append(provider)
         except Exception as exc:
             retry_error = f"Retry provider call failed: {type(exc).__name__}"
+            retry_failure_details = _provider_failure_detail(
+                exc, state.get("force_local", False)
+            )
             items = []
         else:
             try:
                 items = _parse_json_array(text)
             except ValueError as exc:
                 retry_error = str(exc)
+                retry_failure_details = (
+                    f"provider={provider} error=InvalidJSON"
+                )
                 items = []
             else:
                 retry_error = ""
 
         if retry_error:
-            response_error = _agent_response_error(
+            if not retry_failure_details:
+                retry_failure_details = (
+                    f"provider={providers[0]} error=InvalidJSON; "
+                    f"provider={provider} error=InvalidJSON"
+                )
+            response_error = _llm_unavailable_finding(
                 agent,
-                "The agent could not produce a valid JSON array after one retry; "
-                "no model findings were accepted. First response: "
-                f"{first_error}. Retry response: {retry_error}.",
+                f"{agent} could not produce valid JSON after one retry; "
+                f"{retry_failure_details}.",
             )
             items = []
         else:
@@ -277,7 +313,7 @@ def security_agent(state: dict) -> dict:
         "response_errors": [response_error] if response_error else [],
         "log": [f"Security Agent found {len(findings)} issue(s) via {', '.join(providers)}{retry_note}",
             f"Security Agent dropped {dropped} finding(s) as unverified"]
-            + ([f"Agent response error: {response_error['detail']}"]
+            + ([f"LLM unavailable: {response_error['detail']}"]
                if response_error else [])}
 
 
@@ -291,7 +327,7 @@ def bug_agent(state: dict) -> dict:
         "response_errors": [response_error] if response_error else [],
         "log": [f"Bug-Detection Agent found {len(findings)} issue(s) via {', '.join(providers)}{retry_note}",
             f"Bug-Detection Agent dropped {dropped} finding(s) as unverified"]
-            + ([f"Agent response error: {response_error['detail']}"]
+            + ([f"LLM unavailable: {response_error['detail']}"]
                if response_error else [])}
 
 
@@ -430,8 +466,14 @@ def merge_and_score(
             best.pop(index)
 
     merged = sorted(best, key=lambda f: (SEVERITIES.index(f["severity"]), f["line"] or 0))
-    score = max(0, 100 - sum(SEVERITY_PENALTY[f["severity"]] for f in merged))
-    has_blocker = any(f["severity"] in ("critical", "high") for f in merged)
+    scored_findings = [finding for finding in merged if not _is_llm_warning(finding)]
+    score = max(
+        0,
+        100 - sum(SEVERITY_PENALTY[f["severity"]] for f in scored_findings),
+    )
+    has_blocker = any(
+        f["severity"] in ("critical", "high") for f in scored_findings
+    )
     return merged, score, (score >= PASS_SCORE and not has_blocker)
 
 
@@ -449,11 +491,24 @@ def summary_agent(state: dict) -> dict:
 
 
 def coder_agent(state: dict) -> dict:
+    actionable_findings = [
+        finding for finding in state["merged"] if not _is_llm_warning(finding)
+    ]
     to_fix = [
-        finding for finding in state["merged"]
-        if finding["severity"] in ("critical", "high", "medium")
-        or finding.get("agent") in {"ast-scan", "secrets-scan"}
-    ] or state["merged"]
+        finding for finding in actionable_findings
+        if (
+            finding["severity"] in ("critical", "high", "medium")
+            or finding.get("agent") in {"ast-scan", "secrets-scan"}
+        )
+    ] or actionable_findings
+    if not to_fix and not state.get("validation_errors"):
+        return {
+            "current_code": state["current_code"],
+            "iteration": state.get("iteration", 0),
+            "providers": [],
+            "interface_findings": [],
+            "log": ["Coder Agent skipped: no actionable findings"],
+        }
     listing = "\n".join(
         f"- line {f['line']}: [{f['severity']}] {f['title']} - {f['detail']}" for f in to_fix)
     user = f"Language: {state['language']}\n\nFINDINGS TO FIX:\n{listing}\n\nFILE:\n{state['current_code']}"
@@ -464,7 +519,27 @@ def coder_agent(state: dict) -> dict:
             + "\n".join(validation_errors)
             + "\nFix these errors while preserving the existing behavior and interfaces."
         )
-    text, provider = call_llm(CODER_SYSTEM, user, state.get("force_local", False))
+    try:
+        text, provider = call_llm(
+            CODER_SYSTEM, user, state.get("force_local", False)
+        )
+    except Exception as exc:
+        provider_details = _provider_failure_detail(
+            exc, state.get("force_local", False)
+        )
+        warning = _llm_unavailable_finding(
+            "Coder Agent",
+            f"Coder Agent could not apply fixes; {provider_details}. "
+            "The source file was left unchanged.",
+        )
+        return {
+            "current_code": state["current_code"],
+            "iteration": state.get("iteration", 0),
+            "providers": [],
+            "response_errors": [warning],
+            "interface_findings": [],
+            "log": [f"LLM unavailable: {warning['detail']}"],
+        }
     m = re.search(r"```[a-zA-Z+#]*\n(.*?)```", text, re.S)
     fixed = (m.group(1) if m else text).rstrip() + "\n"
     iteration = state.get("iteration", 0) + 1
@@ -483,20 +558,36 @@ def coder_agent(state: dict) -> dict:
 
 
 def write_summary_with_provider(state: dict) -> tuple[str, str | None]:
-    counts = {s: sum(1 for f in state["merged"] if f["severity"] == s) for s in SEVERITIES}
+    counts = {
+        severity: sum(
+            1 for finding in state["merged"]
+            if finding["severity"] == severity and not _is_llm_warning(finding)
+        )
+        for severity in SEVERITIES
+    }
     user = (f"Language: {state['language']}\nFinal score: {state['score']}/100\n"
             f"Remaining findings by severity: {counts}\nFix rounds: {state.get('iteration', 0)}\n"
             f"Remaining findings: {json.dumps(state['merged'][:15])}")
-    try:
-        text, provider = call_llm(SUMMARY_SYSTEM, user, state.get("force_local", False))
-        return text.strip(), provider
-    except Exception:
-        return (
-            f"Final score {state['score']}/100 after {state.get('iteration', 0)} fix round(s). "
-            f"Remaining: {counts}.",
-            None,
+    text, provider = call_llm(SUMMARY_SYSTEM, user, state.get("force_local", False))
+    return text.strip(), provider
+
+
+def _fallback_summary(state: dict) -> str:
+    counts = {
+        severity: sum(
+            1 for finding in state["merged"]
+            if finding["severity"] == severity and not _is_llm_warning(finding)
         )
+        for severity in SEVERITIES
+    }
+    return (
+        f"Final score {state['score']}/100 after "
+        f"{state.get('iteration', 0)} fix round(s). Remaining: {counts}."
+    )
 
 
 def write_summary(state: dict) -> str:
-    return write_summary_with_provider(state)[0]
+    try:
+        return write_summary_with_provider(state)[0]
+    except Exception:
+        return _fallback_summary(state)
