@@ -1,3 +1,5 @@
+import pytest
+
 import run_pipeline
 from run_pipeline import cloud_startup_warning, parse_args, pipeline_settings
 from static_analysis import static_analysis_mode
@@ -73,8 +75,16 @@ def test_static_analysis_mode_respects_explicit_setting_over_windows_default(
     assert static_analysis_mode() == "direct calls (USE_MCP=0; Windows default)"
 
 
+@pytest.mark.parametrize(
+    ("configured_value", "expected_mode"),
+    [
+        ("0", "direct calls (USE_MCP=0; explicit setting)"),
+        ("1", "MCP (USE_MCP=1; explicit setting)"),
+        (None, "direct calls (USE_MCP=0; Windows default)"),
+    ],
+)
 def test_runner_prints_static_analysis_mode_at_startup(
-    tmp_path, monkeypatch, capsys,
+    configured_value, expected_mode, tmp_path, monkeypatch, capsys,
 ):
     project_dir = tmp_path / "project"
     sample_dir = project_dir / "sample"
@@ -94,7 +104,11 @@ def test_runner_prints_static_analysis_mode_at_startup(
         "build_graph",
         lambda: (_ for _ in ()).throw(RuntimeError("offline test stop")),
     )
-    monkeypatch.setenv("USE_MCP", "0")
+    monkeypatch.setattr("static_analysis.sys.platform", "win32")
+    if configured_value is None:
+        monkeypatch.delenv("USE_MCP", raising=False)
+    else:
+        monkeypatch.setenv("USE_MCP", configured_value)
 
     try:
         run_pipeline.main([])
@@ -102,7 +116,5 @@ def test_runner_prints_static_analysis_mode_at_startup(
         assert str(exc) == "offline test stop"
     else:
         raise AssertionError("Expected mocked pipeline failure")
-
     output = capsys.readouterr().out
-    assert "Static analysis: direct calls (USE_MCP=0; explicit setting)" in output
-    assert "Static analysis:" in output.splitlines()[0]
+    assert output.splitlines()[0] == f"Static analysis: {expected_mode}"
