@@ -14,6 +14,19 @@ TOOL_FOR_LANG = {
 }
 
 
+def static_analysis_mode() -> str:
+    configured = os.getenv("USE_MCP")
+    if configured is None:
+        enabled = sys.platform != "win32"
+        source = "Windows default" if sys.platform == "win32" else "platform default"
+    else:
+        enabled = configured == "1"
+        source = "explicit setting"
+    mode = "MCP" if enabled else "direct calls"
+    value = "1" if enabled else "0"
+    return f"{mode} (USE_MCP={value}; {source})"
+
+
 async def _call_mcp(tool: str, args: dict) -> str:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client

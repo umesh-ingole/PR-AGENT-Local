@@ -49,6 +49,7 @@ def test_run_info_records_run_metadata_without_environment_secrets(tmp_path, mon
     settings = {
         "force_local": False,
         "max_iterations": 3,
+        "static_analysis_mode": "direct calls (USE_MCP=0; explicit setting)",
     }
     final_state = {
         "providers": ["gemini", "ollama", "gemini"],
@@ -75,6 +76,9 @@ def test_run_info_records_run_metadata_without_environment_secrets(tmp_path, mon
     assert saved["start_time"] == "2026-10-15T00:00:00+00:00"
     assert saved["total_elapsed_seconds"] == 12.346
     assert saved["termination_reason"] == "passed"
+    assert saved["static_analysis_mode"] == (
+        "direct calls (USE_MCP=0; explicit setting)"
+    )
     assert saved["raw_penalty_history"] == [124, 80, 10]
     assert saved["rejected_fix_count"] == 2
     assert saved["llm_call_count"] == 7
@@ -115,6 +119,7 @@ def test_latest_run_loader_prints_info_only_run(tmp_path, monkeypatch, capsys):
 def test_runner_saves_safe_run_info_when_pipeline_raises(tmp_path, monkeypatch):
     secret = "test-google-secret-value-do-not-save"
     monkeypatch.setenv("GOOGLE_API_KEY", secret)
+    monkeypatch.setenv("USE_MCP", "0")
     project_dir = tmp_path / "project"
     sample_dir = project_dir / "sample"
     sample_dir.mkdir(parents=True)
@@ -140,6 +145,12 @@ def test_runner_saves_safe_run_info_when_pipeline_raises(tmp_path, monkeypatch):
     contents = info_path.read_text(encoding="utf-8")
     saved = json.loads(contents)
     assert saved["termination_reason"] == "error"
+    assert saved["static_analysis_mode"] == (
+        "direct calls (USE_MCP=0; explicit setting)"
+    )
+    assert saved["static_analysis_mode"] == (
+        "direct calls (USE_MCP=0; explicit setting)"
+    )
     assert secret not in contents
     assert "GOOGLE_API_KEY" not in contents
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from config import EXT_TO_LANG, MAX_ITERATIONS
 from graph import build_graph
 import llm_gateway
+from static_analysis import static_analysis_mode
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -92,6 +93,7 @@ def build_run_info(
         "start_time": start_time,
         "total_elapsed_seconds": round(total_elapsed_seconds, 3),
         "termination_reason": termination_reason,
+        "static_analysis_mode": settings["static_analysis_mode"],
         "raw_penalty_history": list(final_state.get("penalty_history", [])),
         "rejected_fix_count": final_state.get("rejected_fix_count", 0),
         "llm_call_count": final_state.get("llm_call_count", 0),
@@ -138,6 +140,8 @@ def save_final_artifacts(run_dir: Path, filename: str, original: str, fixed: str
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     settings = pipeline_settings(args.cloud, args.no_fallback)
+    settings["static_analysis_mode"] = static_analysis_mode()
+    print(f"Static analysis: {settings['static_analysis_mode']}")
     if not settings["force_local"]:
         os.environ["LLM_PROVIDERS"] = settings["provider_order"]
     print(f"Mode: {settings['mode']}; max_iterations={settings['max_iterations']}")
