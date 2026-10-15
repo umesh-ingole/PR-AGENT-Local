@@ -7,7 +7,7 @@ def main() -> None:
     runs_dir = Path(__file__).resolve().parent / "runs"
     saved_runs = sorted(
         (path for path in runs_dir.glob("*") if path.is_dir()
-         and any(path.glob("round_*_findings.json"))),
+         and (any(path.glob("round_*_findings.json")) or (path / "run_info.json").exists())),
         key=lambda path: path.name,
     ) if runs_dir.exists() else []
 
@@ -17,6 +17,13 @@ def main() -> None:
 
     run_dir = saved_runs[-1]
     print(f"Latest run: {run_dir.name}")
+    run_info_path = run_dir / "run_info.json"
+    if run_info_path.exists():
+        run_info = json.loads(run_info_path.read_text(encoding="utf-8"))
+        print("\nRun information:")
+        print(json.dumps(run_info, indent=2, ensure_ascii=False))
+    else:
+        print("\nRun information is not available for this run.")
     for findings_path in sorted(run_dir.glob("round_*_findings.json")):
         findings = json.loads(findings_path.read_text(encoding="utf-8"))
         print(f"\nRound {findings['round']} score: {findings['score']}/100")

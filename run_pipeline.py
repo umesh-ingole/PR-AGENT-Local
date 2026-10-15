@@ -4,7 +4,7 @@ import json
 import difflib
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from config import EXT_TO_LANG, MAX_ITERATIONS
@@ -48,12 +48,56 @@ def save_round_findings(run_dir: Path, round_number: int, update: dict) -> Path:
         json.dumps({
             "round": round_number,
             "score": update["score"],
+            "raw_penalty": update["raw_penalty"],
             "passed": update.get("passed", False),
             "findings": update.get("merged", []),
         }, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     return findings_path
+
+
+def build_run_info(
+    settings: dict,
+    final_state: dict,
+    start_time: str,
+    total_elapsed_seconds: float,
+    termination_reason: str,
+) -> dict:
+    return {
+        "providers": list(final_state.get("providers", [])),
+        "models": {
+            "gemini": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            "ollama": os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b"),
+        },
+        "cloud": not settings["force_local"],
+        "force_local": settings["force_local"],
+        "max_iterations": settings["max_iterations"],
+        "start_time": start_time,
+        "total_elapsed_seconds": round(total_elapsed_seconds, 3),
+        "termination_reason": termination_reason,
+        "raw_penalty_history": list(final_state.get("penalty_history", [])),
+        "rejected_fix_count": final_state.get("rejected_fix_count", 0),
+    }
+
+
+def save_run_info(run_dir: Path, run_info: dict) -> Path:
+    info_path = run_dir / "run_info.json"
+    info_path.write_text(
+        json.dumps(run_info, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return info_path
+
+
+def termination_reason(final_state: dict, max_iterations: int) -> str:
+    if final_state.get("passed", False):
+        return "passed"
+    if final_state.get("stop_no_improvement", False):
+        return "early stop"
+    if final_state.get("iteration", 0) >= max_iterations:
+        return "round cap"
+    return "error"
 
 
 def save_final_artifacts(run_dir: Path, filename: str, original: str, fixed: str) -> tuple[Path, Path]:
@@ -89,6 +133,8 @@ def main(argv: list[str] | None = None) -> None:
     language = EXT_TO_LANG[os.path.splitext(filename)[1].lower()]
     run_dir = create_run_directory(project_dir / "runs")
     print(f"Saving run artifacts to: {run_dir}")
+    start_time = datetime.now(timezone.utc).isoformat()
+    started = time.perf_counter()
     initial = {
         "filename": filename,
         "language": language,
@@ -99,31 +145,57 @@ def main(argv: list[str] | None = None) -> None:
         "providers": [],
         "log": [],
         "score_history": [],
+        "penalty_history": [],
+        "rejected_fix_count": 0,
     }
     final = dict(initial)
-    started = time.perf_counter()
-    graph = build_graph()
     score_round = 0
+    try:
+        graph = build_graph()
+        for chunk in graph.stream(initial, stream_mode="updates"):
+            for node, update in chunk.items():
+                if not update:
+                    continue
+                elapsed = time.perf_counter() - started
+                for line in update.get("log", []):
+                    print(f"[{elapsed:7.2f}s] {node}: {line}")
+                if "score" in update:
+                    score_round += 1
+                    print(
+                        f"[{elapsed:7.2f}s] Score after round {score_round}: "
+                        f"{update['score']}/100; raw penalty: {update['raw_penalty']}"
+                    )
+                    findings_path = save_round_findings(run_dir, score_round, update)
+                    print(f"[{elapsed:7.2f}s] Saved round findings: {findings_path.name}")
+                for key, value in update.items():
+                    if key in (
+                        "providers", "log", "score_history", "penalty_history",
+                        "rejected_fix_count",
+                    ):
+                        final[key] = final.get(key, [] if key != "rejected_fix_count" else 0) + value
+                    else:
+                        final[key] = value
 
-    for chunk in graph.stream(initial, stream_mode="updates"):
-        for node, update in chunk.items():
-            elapsed = time.perf_counter() - started
-            for line in update.get("log", []):
-                print(f"[{elapsed:7.2f}s] {node}: {line}")
-            if "score" in update:
-                score_round += 1
-                print(f"[{elapsed:7.2f}s] Score after round {score_round}: {update['score']}/100")
-                findings_path = save_round_findings(run_dir, score_round, update)
-                print(f"[{elapsed:7.2f}s] Saved round findings: {findings_path.name}")
-            for key, value in update.items():
-                if key in ("providers", "log", "score_history"):
-                    final[key] = final.get(key, []) + value
-                else:
-                    final[key] = value
+        fixed_path, diff_path = save_final_artifacts(
+            run_dir, filename, initial["original_code"], final["current_code"])
+    except Exception:
+        elapsed = time.perf_counter() - started
+        save_run_info(
+            run_dir,
+            build_run_info(settings, final, start_time, elapsed, "error"),
+        )
+        raise
 
-    fixed_path, diff_path = save_final_artifacts(
-        run_dir, filename, initial["original_code"], final["current_code"])
-    print(f"\nFinal score: {final['score']}/100")
+    elapsed = time.perf_counter() - started
+    reason = termination_reason(final, settings["max_iterations"])
+    save_run_info(
+        run_dir,
+        build_run_info(settings, final, start_time, elapsed, reason),
+    )
+    print(
+        f"\nFinal score: {final['score']}/100; "
+        f"raw penalty: {final['raw_penalty']}"
+    )
     print("Final findings:")
     if final["merged"]:
         print(json.dumps(final["merged"], indent=2, ensure_ascii=False))
@@ -131,7 +203,7 @@ def main(argv: list[str] | None = None) -> None:
         print("No findings.")
     print(f"Final fixed file: {fixed_path}")
     print(f"Unified diff: {diff_path}")
-    print(f"\nTotal elapsed: {time.perf_counter() - started:.2f} seconds")
+    print(f"\nTotal elapsed: {elapsed:.2f} seconds")
 
 
 if __name__ == "__main__":

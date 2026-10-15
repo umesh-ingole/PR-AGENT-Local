@@ -80,7 +80,7 @@ def test_ignores_short_words_and_non_secret_name_suffixes():
 
 def test_static_and_coder_nodes_refresh_secret_findings(monkeypatch):
     initial_code = 'API_KEY = "sk-live-123"\n'
-    fixed_code = 'API_KEY = os.getenv("API_KEY")\n'
+    fixed_code = 'import os\nAPI_KEY = os.getenv("API_KEY")\n'
     monkeypatch.setattr(graph, "run_static_analysis", lambda *_args: ("pylint", "lint output"))
 
     initial = graph.static_node({"language": "python", "current_code": initial_code})

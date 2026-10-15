@@ -317,6 +317,13 @@ def coder_agent(state: dict) -> dict:
     listing = "\n".join(
         f"- line {f['line']}: [{f['severity']}] {f['title']} - {f['detail']}" for f in to_fix)
     user = f"Language: {state['language']}\n\nFINDINGS TO FIX:\n{listing}\n\nFILE:\n{state['current_code']}"
+    validation_errors = state.get("validation_errors", [])
+    if validation_errors:
+        user += (
+            "\n\nVALIDATION ERRORS (exact messages):\n"
+            + "\n".join(validation_errors)
+            + "\nFix these errors while preserving the existing behavior and interfaces."
+        )
     text, provider = call_llm(CODER_SYSTEM, user, state.get("force_local", False))
     m = re.search(r"```[a-zA-Z+#]*\n(.*?)```", text, re.S)
     fixed = (m.group(1) if m else text).rstrip() + "\n"

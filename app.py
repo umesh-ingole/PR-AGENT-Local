@@ -92,17 +92,24 @@ with st.expander("Preview uploaded code"):
 if st.button("Review and fix", type="primary"):
     init = {"filename": filename, "language": language, "original_code": code,
             "current_code": code, "force_local": force_local, "max_iterations": max_rounds,
-            "providers": [], "log": [], "score_history": []}
+            "providers": [], "log": [], "score_history": [], "penalty_history": [],
+            "rejected_fix_count": 0}
     final = dict(init)
     try:
         with st.status("Running review pipeline...", expanded=True) as status:
             for chunk in get_graph().stream(init, stream_mode="updates"):
                 for node, update in chunk.items():
+                    if not update:
+                        continue
                     for line in update.get("log", []):
                         st.write(f"**{STEP_LABEL.get(node, node)}**: {line}")
                     for key, value in update.items():
-                        if key in ("providers", "log", "score_history"):
-                            final[key] = final.get(key, []) + value
+                        if key in (
+                            "providers", "log", "score_history", "penalty_history",
+                            "rejected_fix_count",
+                        ):
+                            default = 0 if key == "rejected_fix_count" else []
+                            final[key] = final.get(key, default) + value
                         else:
                             final[key] = value
             status.update(label="Review complete", state="complete", expanded=False)

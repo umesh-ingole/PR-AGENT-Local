@@ -172,6 +172,34 @@ def run_pylint(code: str) -> str:
     )
 
 
+def run_pylint_errors_only(code: str) -> list[str]:
+    path = _write_temp(code, ".py")
+    try:
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "pylint", "--score=n", "--reports=n",
+                "--disable=all", "--enable=E", "--msg-template={msg_id}:{msg}",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        errors = [
+            line.strip()
+            for line in output.splitlines()
+            if re.match(r"^E\d{4}:", line.strip())
+        ]
+        if result.returncode and not errors:
+            raise RuntimeError(
+                f"Pylint errors-only check failed: {output.strip() or result.returncode}"
+            )
+        return errors
+    finally:
+        os.remove(path)
+
+
 def run_checkstyle(code: str) -> str:
     # Checkstyle needs the public class name to match the file name; a temp
     # name will raise one extra warning about that. It is safe to ignore.

@@ -4,16 +4,17 @@ START -> static -> rag -> [security || bug] -> summary -> good enough?
                                          ^                 | no -> coder -> [security || bug]
                                          |                 | yes -> finalize -> END
 """
+import ast
 import operator
 from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
 import agents
-from config import MAX_ITERATIONS
+from config import MAX_ITERATIONS, SEVERITY_PENALTY
 from rag import retrieve_context
 from static_analysis import run_static_analysis
-from tools import scan_secrets
+from tools import run_pylint_errors_only, scan_secrets
 
 
 class ReviewState(TypedDict, total=False):
@@ -32,6 +33,7 @@ class ReviewState(TypedDict, total=False):
     interface_findings: list
     merged: list
     score: int
+    raw_penalty: int
     passed: bool
     stop_no_improvement: bool
     iteration: int
@@ -40,6 +42,8 @@ class ReviewState(TypedDict, total=False):
     providers: Annotated[list, operator.add]
     log: Annotated[list, operator.add]
     score_history: Annotated[list, operator.add]
+    penalty_history: Annotated[list, operator.add]
+    rejected_fix_count: Annotated[int, operator.add]
 
 
 def static_node(state: ReviewState) -> dict:
@@ -69,6 +73,50 @@ def rag_node(state: ReviewState) -> dict:
 
 def coder_node(state: ReviewState) -> dict:
     update = agents.coder_agent(state)
+    previous_code = state["current_code"]
+    rejection_errors = []
+    if state["language"] == "python":
+        baseline_errors = run_pylint_errors_only(previous_code)
+        candidate_code = update["current_code"]
+        rejection_errors = _python_validation_errors(candidate_code, baseline_errors)
+        if rejection_errors:
+            retry_state = {
+                **state,
+                "current_code": candidate_code,
+                "validation_errors": rejection_errors,
+            }
+            retry_update = agents.coder_agent(retry_state)
+            retry_errors = _python_validation_errors(
+                retry_update["current_code"], baseline_errors)
+            update["providers"] = (
+                update.get("providers", []) + retry_update.get("providers", [])
+            )
+            update["log"] = update.get("log", []) + retry_update.get("log", [])
+            update["interface_findings"] = retry_update.get("interface_findings", [])
+            update["iteration"] = update.get("iteration", state.get("iteration", 0) + 1)
+            if retry_errors:
+                error_detail = "; ".join(retry_errors)
+                update["current_code"] = previous_code
+                update.setdefault("interface_findings", []).append({
+                    "line": None,
+                    "severity": "high",
+                    "title": "Coder Agent fix rejected",
+                    "detail": (
+                        "Both Coder Agent attempts failed Python validation. "
+                        f"Rejected validation errors: {error_detail}"
+                    ),
+                    "evidence": "tool",
+                    "agent": "python-validation",
+                })
+                update.setdefault("log", []).append(
+                    "Coder Agent fix rejected after retry; keeping the previous code. "
+                    f"Validation errors: {error_detail}"
+                )
+                update["rejected_fix_count"] = 1
+            else:
+                update["current_code"] = retry_update["current_code"]
+    if state["language"] == "python" and not rejection_errors:
+        update["current_code"] = candidate_code
     # Refresh the linter output on the fixed code so the re-check is grounded.
     code = update["current_code"]
     tool, report = run_static_analysis(state["language"], code)
@@ -82,6 +130,17 @@ def coder_node(state: ReviewState) -> dict:
     return update
 
 
+def _python_validation_errors(candidate_code: str, baseline_errors: list[str]) -> list[str]:
+    errors = []
+    try:
+        ast.parse(candidate_code)
+    except SyntaxError as exc:
+        errors.append(f"SyntaxError: {exc.msg} (line {exc.lineno})")
+    candidate_errors = run_pylint_errors_only(candidate_code)
+    errors.extend(message for message in candidate_errors if message not in baseline_errors)
+    return errors
+
+
 def route_after_summary(state: ReviewState) -> str:
     limit = state.get("max_iterations", 2 if state.get("force_local", False) else MAX_ITERATIONS)
     if state["passed"] or state.get("stop_no_improvement", False) or state.get("iteration", 0) >= limit:
@@ -91,11 +150,15 @@ def route_after_summary(state: ReviewState) -> str:
 
 def summary_node(state: ReviewState) -> dict:
     update = agents.summary_agent(state)
-    previous_scores = state.get("score_history", [])
-    if previous_scores and update["score"] <= previous_scores[-1]:
+    raw_penalty = sum(SEVERITY_PENALTY[f["severity"]] for f in update["merged"])
+    update["raw_penalty"] = raw_penalty
+    update["penalty_history"] = [raw_penalty]
+    previous_penalties = state.get("penalty_history", [])
+    if previous_penalties and raw_penalty >= previous_penalties[-1]:
         update["stop_no_improvement"] = True
         update.setdefault("log", []).append(
-            f"Score did not improve ({previous_scores[-1]} -> {update['score']}); stopping early"
+            f"Raw penalty did not improve ({previous_penalties[-1]} -> {raw_penalty}); "
+            "stopping early"
         )
     else:
         update["stop_no_improvement"] = False

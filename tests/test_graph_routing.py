@@ -15,6 +15,7 @@ def _make_state(force_local: bool, max_iterations: int = 2):
         "providers": [],
         "log": [],
         "score_history": [],
+        "penalty_history": [],
         "iteration": 0,
     }
 
@@ -257,7 +258,7 @@ def test_force_local_true_never_passes_coder_runs_exactly_twice(monkeypatch):
         summary_round["n"] += 1
         score = 40 + 10 * summary_round["n"]
         return {
-            "merged": [],
+            "merged": [{"severity": "critical"}] * (4 - summary_round["n"]),
             "score": score,
             "passed": False,
             "score_history": [score],
@@ -294,19 +295,21 @@ def test_force_local_true_never_passes_coder_runs_exactly_twice(monkeypatch):
     assert calls[-1] == "finalize"
 
 
-def test_first_round_does_not_stop_without_previous_score(monkeypatch):
+def test_first_round_does_not_stop_without_previous_penalty(monkeypatch):
     monkeypatch.setattr(
         graph.agents,
         "summary_agent",
         lambda _state: {
             "score": 55,
             "passed": False,
+            "merged": [],
             "score_history": [55],
             "log": ["summary"],
         },
     )
     state = {
         "score_history": [],
+        "penalty_history": [],
         "force_local": True,
         "max_iterations": 3,
         "iteration": 0,
@@ -333,7 +336,83 @@ def test_force_local_false_defaults_to_three_iterations_in_all_entry_points():
     assert pipeline_settings(cloud=True)["max_iterations"] == 3
 
 
-def test_stops_after_score_fails_to_improve(monkeypatch):
+def test_early_stop_uses_raw_penalty_and_respects_round_cap(monkeypatch):
+    def findings_for_penalty(penalty):
+        severities = []
+        while penalty >= 40:
+            severities.append({"severity": "critical"})
+            penalty -= 40
+        while penalty >= 20:
+            severities.append({"severity": "high"})
+            penalty -= 20
+        while penalty >= 8:
+            severities.append({"severity": "medium"})
+            penalty -= 8
+        while penalty >= 2:
+            severities.append({"severity": "low"})
+            penalty -= 2
+        assert penalty == 0
+        return severities
+
+    for previous, current, expected_route in (
+        (120, 100, "coder"),
+        (100, 120, "finalize"),
+        (100, 100, "finalize"),
+    ):
+        monkeypatch.setattr(
+            graph.agents,
+            "summary_agent",
+            lambda _state, penalty=current: {
+                "merged": findings_for_penalty(penalty),
+                "score": 0,
+                "passed": False,
+                "score_history": [0],
+                "log": ["summary"],
+            },
+        )
+        state = {
+            "score_history": [0],
+            "penalty_history": [previous],
+            "force_local": True,
+            "max_iterations": 3,
+            "iteration": 0,
+            "passed": False,
+        }
+
+        update = graph.summary_node(state)
+        next_state = {**state, **update}
+
+        assert update["score"] == 0
+        assert update["raw_penalty"] == current
+        assert update["penalty_history"] == [current]
+        assert graph.route_after_summary(next_state) == expected_route
+
+    monkeypatch.setattr(
+        graph.agents,
+        "summary_agent",
+        lambda _state: {
+            "merged": findings_for_penalty(100),
+            "score": 0,
+            "passed": False,
+            "score_history": [0],
+            "log": ["summary"],
+        },
+    )
+    capped_state = {
+        "score_history": [0],
+        "penalty_history": [120],
+        "force_local": True,
+        "max_iterations": 2,
+        "iteration": 2,
+        "passed": False,
+    }
+    capped_update = graph.summary_node(capped_state)
+    capped_next_state = {**capped_state, **capped_update}
+    assert capped_update["stop_no_improvement"] is False
+    assert graph.route_after_summary(capped_next_state) == "finalize"
+
+
+def test_stops_after_raw_penalty_fails_to_improve(monkeypatch):
     calls = []
     score_round = {"n": 0}
 
@@ -393,7 +472,7 @@ def test_stops_after_score_fails_to_improve(monkeypatch):
     assert calls.count("summary") == 2
     assert calls.count("coder") == 1
     assert calls[-1] == "finalize"
-    assert any("Score did not improve (70 -> 70)" in line for line in result["log"])
+    assert any("Raw penalty did not improve (0 -> 0)" in line for line in result["log"])
 
 
 def test_finalize_logs_summary_llm_provider(monkeypatch):
@@ -446,8 +525,19 @@ def test_cloud_three_rounds_record_only_summary_scores_and_findings(monkeypatch)
     def fake_summary(state):
         calls["summary"] += 1
         score = 40 + (calls["summary"] * 10)
+        findings = [
+            dict(security_finding),
+            dict(bug_finding),
+        ]
+        severities = {
+            1: ("critical", "high"),
+            2: ("high", "medium"),
+            3: ("medium", "low"),
+        }[calls["summary"]]
+        for finding, severity in zip(findings, severities):
+            finding["severity"] = severity
         return {
-            "merged": state["security_findings"] + state["bug_findings"],
+            "merged": findings,
             "score": score,
             "passed": False,
             "score_history": [score],
