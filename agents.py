@@ -1,5 +1,6 @@
 """Blue boxes: Security, Bug-Detection, Summary, Coder agents."""
 import ast
+import difflib
 import json
 import re
 
@@ -81,8 +82,20 @@ def _parse_json_array(text: str) -> list[dict]:
     return data
 
 
-def _normalize(items: list[dict], agent: str) -> list[dict]:
+def _report_line_numbers(report: str) -> set[int]:
+    lines = set()
+    for entry in report.splitlines():
+        match = re.search(r"(?:^|:)(\d+):", entry)
+        if match:
+            lines.add(int(match.group(1)))
+    return lines
+
+
+def _normalize(
+    items: list[dict], agent: str, tool_lines: set[int] | None = None,
+) -> list[dict]:
     out = []
+    tool_lines = tool_lines or set()
     for d in items:
         sev = str(d.get("severity", "low")).lower()
         if sev not in SEVERITIES:
@@ -94,7 +107,7 @@ def _normalize(items: list[dict], agent: str) -> list[dict]:
             "title": str(d.get("title", "Issue"))[:120],
             "detail": str(d.get("detail", ""))[:600],
             "code": d["code"],
-            "evidence": "tool" if d.get("evidence") == "tool" else "reasoning",
+            "evidence": "tool" if line in tool_lines else "reasoning",
             "agent": agent,
         })
     return out
@@ -175,7 +188,13 @@ def _review(system: str, agent: str, state: dict) -> tuple[list[dict], list[str]
         items = _parse_json_array(text)
         retried = True
     items, dropped = _verified_findings(items, state["current_code"])
-    return _normalize(items, agent), providers, retried, dropped
+    tool_lines = _report_line_numbers(state.get("static_report", ""))
+    tool_lines.update(
+        finding["line"]
+        for finding in state.get("secret_findings", [])
+        if isinstance(finding.get("line"), int)
+    )
+    return _normalize(items, agent, tool_lines), providers, retried, dropped
 
 
 def security_agent(state: dict) -> dict:
@@ -291,12 +310,40 @@ def merge_and_score(
     interface: list[dict] | None = None,
 ) -> tuple[list[dict], int, bool]:
     """Deterministic merge + severity score, so the pass/fail decision is traceable."""
-    best: dict[tuple, dict] = {}
+    best: list[dict] = []
     for f in security + bugs + (secrets or []) + (interface or []):
-        key = (f["line"], re.sub(r"\W+", "", f["title"].lower())[:30])
-        if key not in best or SEVERITIES.index(f["severity"]) < SEVERITIES.index(best[key]["severity"]):
-            best[key] = f
-    merged = sorted(best.values(), key=lambda f: (SEVERITIES.index(f["severity"]), f["line"] or 0))
+        exact_title = re.sub(r"\W+", "", f["title"].lower())[:30]
+        quoted_code = re.sub(r"\s+", "", f.get("code", ""))
+        duplicates = []
+        for index, existing in enumerate(best):
+            same_existing_key = (
+                f["line"] == existing["line"]
+                and exact_title == re.sub(r"\W+", "", existing["title"].lower())[:30]
+            )
+            close_cross_agent_quote = (
+                bool(quoted_code)
+                and f.get("agent") != existing.get("agent")
+                and re.sub(r"\s+", "", existing.get("code", "")) == quoted_code
+                and isinstance(f.get("line"), int)
+                and isinstance(existing.get("line"), int)
+                and abs(f["line"] - existing["line"]) <= 2
+                and difflib.SequenceMatcher(
+                    None, f["title"].lower(), existing["title"].lower()
+                ).ratio() >= 0.6
+            )
+            if same_existing_key or close_cross_agent_quote:
+                duplicates.append(index)
+        if not duplicates:
+            best.append(f)
+            continue
+        group = [best[index] for index in duplicates] + [f]
+        strongest = min(group, key=lambda item: SEVERITIES.index(item["severity"]))
+        first_duplicate = duplicates[0]
+        best[first_duplicate] = strongest
+        for index in reversed(duplicates[1:]):
+            best.pop(index)
+
+    merged = sorted(best, key=lambda f: (SEVERITIES.index(f["severity"]), f["line"] or 0))
     score = max(0, 100 - sum(SEVERITY_PENALTY[f["severity"]] for f in merged))
     has_blocker = any(f["severity"] in ("critical", "high") for f in merged)
     return merged, score, (score >= PASS_SCORE and not has_blocker)

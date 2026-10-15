@@ -219,3 +219,75 @@ def test_drops_quote_that_matches_but_is_more_than_two_lines_away(monkeypatch):
 
     assert result["bug_findings"] == []
     assert any("dropped 1 finding(s) as unverified" in line for line in result["log"])
+
+
+def test_finding_evidence_is_derived_from_report_and_secret_scan_lines(monkeypatch):
+    state = {
+        **_state(),
+        "current_code": "first()\nreported()\nsecret()\n",
+        "static_report": "2:warning:example:reported diagnostic",
+        "secret_findings": [{"line": 3}],
+    }
+    findings = [
+        {**_finding("first()", line=1), "evidence": "tool"},
+        {**_finding("reported()", line=2), "evidence": "reasoning"},
+        {**_finding("secret()", line=3), "evidence": "reasoning"},
+    ]
+    monkeypatch.setattr(
+        agents,
+        "call_llm",
+        lambda *_args, **_kwargs: (json.dumps(findings), "ollama"),
+    )
+
+    result = agents.bug_agent(state)
+
+    assert [finding["evidence"] for finding in result["bug_findings"]] == [
+        "reasoning", "tool", "tool",
+    ]
+
+
+def test_merge_deduplicates_nearby_cross_agent_quotes_and_keeps_highest_severity():
+    security = {
+        "line": 10,
+        "severity": "medium",
+        "title": "SQL injection",
+        "detail": "The query is injectable.",
+        "code": "cursor.execute(query)",
+        "evidence": "reasoning",
+        "agent": "security-agent",
+    }
+    bug = {
+        **security,
+        "line": 12,
+        "severity": "critical",
+        "title": "SQL injection vulnerability",
+        "agent": "bug-agent",
+    }
+
+    merged, _score, _passed = agents.merge_and_score([security], [bug])
+
+    assert len(merged) == 1
+    assert merged[0]["severity"] == "critical"
+    assert merged[0]["agent"] == "bug-agent"
+
+
+def test_merge_keeps_nearby_quotes_when_titles_are_not_similar():
+    first = {
+        "line": 10,
+        "severity": "high",
+        "title": "SQL injection",
+        "detail": "The query is injectable.",
+        "code": "cursor.execute(query)",
+        "evidence": "reasoning",
+        "agent": "security-agent",
+    }
+    second = {
+        **first,
+        "line": 12,
+        "title": "Missing return statement",
+        "agent": "bug-agent",
+    }
+
+    merged, _score, _passed = agents.merge_and_score([first], [second])
+
+    assert len(merged) == 2

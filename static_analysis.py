@@ -1,4 +1,4 @@
-"""Static Analysis stage. Calls linters through MCP (default) or directly."""
+"""Static Analysis stage. Calls linters through MCP or directly."""
 import asyncio
 import os
 import sys
@@ -34,7 +34,8 @@ def run_static_analysis(language: str, code: str) -> tuple[str, str]:
     if language not in TOOL_FOR_LANG:
         return tools.analyze(language, code)
     tool, extra = TOOL_FOR_LANG[language]
-    if os.getenv("USE_MCP", "1") == "1":
+    default_use_mcp = "0" if sys.platform == "win32" else "1"
+    if os.getenv("USE_MCP", default_use_mcp) == "1":
         try:
             return tool, asyncio.run(_call_mcp(tool, {"code": code, **extra}))
         except Exception as exc:  # MCP unavailable -> deterministic direct call

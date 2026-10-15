@@ -18,7 +18,10 @@ def _mock_validation_environment(monkeypatch, candidates):
             "iteration": state.get("iteration", 0) + 1,
             "providers": ["mock"],
             "interface_findings": [],
-            "log": ["coder called"],
+            "log": [
+                "Coder Agent applied fixes "
+                f"(round {state.get('iteration', 0) + 1}) via mock; re-checking"
+            ],
         }
 
     def fake_pylint(code):
@@ -53,6 +56,10 @@ def test_missing_os_import_fix_is_retried_and_valid_retry_is_accepted(monkeypatc
     assert calls[1]["validation_errors"] == ["E0602:Undefined variable 'os'"]
     assert update["current_code"] == VALID_FIX
     assert update["interface_findings"] == []
+    assert sum(
+        line.startswith("Coder Agent applied fixes (round ")
+        for line in update["log"]
+    ) == 1
 
 
 def test_valid_fix_is_accepted_without_retry(monkeypatch):
@@ -92,6 +99,10 @@ def test_two_invalid_attempts_keep_previous_code_and_report_rejection(monkeypatc
     assert rejected[0]["severity"] == "high"
     assert "E0602:Undefined variable 'os'" in rejected[0]["detail"]
     assert any("fix rejected after retry" in line for line in update["log"])
+    assert not any(
+        line.startswith("Coder Agent applied fixes (round ")
+        for line in update["log"]
+    )
 
 
 def test_validation_errors_are_appended_to_coder_prompt(monkeypatch):

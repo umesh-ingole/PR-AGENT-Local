@@ -134,10 +134,41 @@ def _run(cmd: list[str]) -> str:
     if shutil.which(cmd[0]) is None and cmd[0] != sys.executable:
         return f"[{cmd[0]} is not installed on this machine - skipped]"
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
+        p = _run_process(cmd)
     except subprocess.TimeoutExpired:
         return f"[{cmd[0]} timed out after {TIMEOUT}s]"
     return ((p.stdout or "") + (p.stderr or "")).strip() or "[no issues reported]"
+
+
+def _run_process(cmd: list[str]) -> subprocess.CompletedProcess:
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        if sys.platform == "win32":
+            try:
+                killer = subprocess.Popen(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                killer.communicate(timeout=10)
+                if killer.returncode:
+                    process.kill()
+            except (OSError, subprocess.TimeoutExpired):
+                process.kill()
+        else:
+            process.kill()
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(
+            cmd, TIMEOUT, output=stdout or exc.output, stderr=stderr or exc.stderr
+        ) from exc
+    return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
 
 def _write_temp(code: str, suffix: str) -> str:
@@ -175,15 +206,12 @@ def run_pylint(code: str) -> str:
 def run_pylint_errors_only(code: str) -> list[str]:
     path = _write_temp(code, ".py")
     try:
-        result = subprocess.run(
+        result = _run_process(
             [
                 sys.executable, "-m", "pylint", "--score=n", "--reports=n",
                 "--disable=all", "--enable=E", "--msg-template={msg_id}:{msg}",
                 path,
             ],
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT,
         )
         output = (result.stdout or "") + (result.stderr or "")
         errors = [
@@ -196,6 +224,8 @@ def run_pylint_errors_only(code: str) -> list[str]:
                 f"Pylint errors-only check failed: {output.strip() or result.returncode}"
             )
         return errors
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Pylint errors-only check timed out after {TIMEOUT}s") from exc
     finally:
         os.remove(path)
 

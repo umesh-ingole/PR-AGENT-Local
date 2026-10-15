@@ -91,10 +91,21 @@ def coder_node(state: ReviewState) -> dict:
             retry_update = agents.coder_agent(retry_state)
             retry_errors = _python_validation_errors(
                 retry_update["current_code"], baseline_errors)
+            retry_fix_logs = [
+                line for line in retry_update.get("log", [])
+                if line.startswith("Coder Agent applied fixes (round ")
+            ]
+            update["log"] = [
+                line for line in update.get("log", [])
+                if not line.startswith("Coder Agent applied fixes (round ")
+            ]
             update["providers"] = (
                 update.get("providers", []) + retry_update.get("providers", [])
             )
-            update["log"] = update.get("log", []) + retry_update.get("log", [])
+            update["log"] = update.get("log", []) + [
+                line for line in retry_update.get("log", [])
+                if not line.startswith("Coder Agent applied fixes (round ")
+            ]
             update["interface_findings"] = retry_update.get("interface_findings", [])
             update["iteration"] = update.get("iteration", state.get("iteration", 0) + 1)
             if retry_errors:
@@ -118,6 +129,8 @@ def coder_node(state: ReviewState) -> dict:
                 update["rejected_fix_count"] = 1
             else:
                 update["current_code"] = retry_update["current_code"]
+                if retry_fix_logs:
+                    update.setdefault("log", []).append(retry_fix_logs[-1])
     if state["language"] == "python" and not rejection_errors:
         update["current_code"] = candidate_code
     # Refresh the linter output on the fixed code so the re-check is grounded.
