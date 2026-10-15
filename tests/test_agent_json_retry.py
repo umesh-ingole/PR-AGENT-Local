@@ -39,19 +39,41 @@ def test_ollama_invalid_json_gets_one_strict_retry(monkeypatch):
     assert "via ollama, ollama" in result["log"][0]
 
 
-def test_second_invalid_ollama_response_fails_after_one_retry(monkeypatch):
+def test_second_invalid_ollama_response_becomes_explicit_response_error(monkeypatch):
     calls = []
 
     def fake_call_llm(system, user, force_local):
-        calls.append(system)
+        calls.append((system, user, force_local))
         return "not json", "ollama"
 
     monkeypatch.setattr(agents, "call_llm", fake_call_llm)
 
-    with pytest.raises(ValueError, match="valid JSON array"):
-        agents.bug_agent(_state())
+    result = agents.bug_agent(_state())
 
     assert len(calls) == 2
+    assert "STRICT FORMAT REMINDER" in calls[1][0]
+    assert "PREVIOUS RESPONSE JSON PARSE ERROR (exact)" in calls[1][1]
+    assert "Expecting value (line 1, column 1)" in calls[1][1]
+    assert result["bug_findings"] == []
+    assert len(result["response_errors"]) == 1
+    error = result["response_errors"][0]
+    assert error["severity"] == "high"
+    assert error["agent"] == "agent-response-error"
+    assert "after one retry" in error["detail"]
+    assert error["detail"].count("Response is not valid JSON") == 2
+    assert any("response error" in line.lower() for line in result["log"])
+
+
+def test_valid_empty_retry_is_not_reported_as_response_error(monkeypatch):
+    responses = iter([("invalid", "ollama"), ("[]", "ollama")])
+    monkeypatch.setattr(
+        agents, "call_llm", lambda *_args, **_kwargs: next(responses)
+    )
+
+    result = agents.security_agent(_state())
+
+    assert result["security_findings"] == []
+    assert result["response_errors"] == []
 
 
 def _finding(code, line=1):

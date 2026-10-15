@@ -93,7 +93,7 @@ if st.button("Review and fix", type="primary"):
     init = {"filename": filename, "language": language, "original_code": code,
             "current_code": code, "force_local": force_local, "max_iterations": max_rounds,
             "providers": [], "log": [], "score_history": [], "penalty_history": [],
-            "rejected_fix_count": 0}
+            "rejected_fix_count": 0, "response_errors": []}
     final = dict(init)
     try:
         with st.status("Running review pipeline...", expanded=True) as status:
@@ -106,7 +106,7 @@ if st.button("Review and fix", type="primary"):
                     for key, value in update.items():
                         if key in (
                             "providers", "log", "score_history", "penalty_history",
-                            "rejected_fix_count",
+                            "rejected_fix_count", "response_errors",
                         ):
                             default = 0 if key == "rejected_fix_count" else []
                             final[key] = final.get(key, default) + value

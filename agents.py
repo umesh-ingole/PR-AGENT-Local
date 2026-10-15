@@ -79,7 +79,10 @@ def _parse_json_array(text: str) -> list[dict]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError("Response is not a valid JSON array") from exc
+        raise ValueError(
+            f"Response is not valid JSON: {exc.msg} "
+            f"(line {exc.lineno}, column {exc.colno})"
+        ) from exc
     if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
         raise ValueError("Response must be a JSON array of finding objects")
     return data
@@ -165,31 +168,91 @@ def _verified_findings(items: list[dict], code: str) -> tuple[list[dict], int]:
     return verified, len(items) - len(verified)
 
 
-def _review(system: str, agent: str, state: dict) -> tuple[list[dict], list[str], bool, int]:
+def _agent_response_error(agent: str, detail: str) -> dict:
+    return {
+        "line": None,
+        "severity": "high",
+        "title": f"{agent.replace('-', ' ').title()} response error",
+        "detail": detail,
+        "code": "",
+        "evidence": "reasoning",
+        "agent": "agent-response-error",
+    }
+
+
+def _review(
+    system: str, agent: str, state: dict,
+) -> tuple[list[dict], list[str], bool, int, dict | None]:
     user = (
         f"Language: {state['language']}\n\n"
         f"STATIC ANALYSIS ({state['static_tool']}):\n{state['static_report'][:3000]}\n\n"
         f"RETRIEVED GUIDANCE:\n{state['context']}\n\n"
         f"CODE (line-numbered):\n{_numbered(state['current_code'])}"
     )
-    text, provider = call_llm(system, user, state.get("force_local", False))
+    try:
+        text, provider = call_llm(system, user, state.get("force_local", False))
+    except Exception as exc:
+        response_error = _agent_response_error(
+            agent,
+            "The initial model call failed before producing a review response "
+            f"({type(exc).__name__}). No model findings were accepted.",
+        )
+        tool_lines = _report_line_numbers(state.get("static_report", ""))
+        tool_lines.update(
+            finding["line"]
+            for finding in state.get("secret_findings", [])
+            if isinstance(finding.get("line"), int)
+        )
+        return [], [], False, 0, response_error
+
     providers = [provider]
     retried = False
     try:
         items = _parse_json_array(text)
-    except ValueError:
-        if provider != "ollama":
-            raise
+    except ValueError as first_error:
+        retry_error = ""
         strict_system = (
             system
             + "\n\nSTRICT FORMAT REMINDER: Your previous response was invalid. "
             "Return only one valid JSON array of finding objects. Do not include "
             "prose, markdown fences, or explanations. Return [] if there are no issues."
         )
-        text, provider = call_llm(strict_system, user, state.get("force_local", False))
-        providers.append(provider)
-        items = _parse_json_array(text)
         retried = True
+        retry_user = (
+            user
+            + "\n\nPREVIOUS RESPONSE JSON PARSE ERROR (exact):\n"
+            + str(first_error)
+            + "\nReturn a corrected JSON array only."
+        )
+        try:
+            text, provider = call_llm(
+                strict_system, retry_user, state.get("force_local", False)
+            )
+            providers.append(provider)
+        except Exception as exc:
+            retry_error = f"Retry provider call failed: {type(exc).__name__}"
+            items = []
+        else:
+            try:
+                items = _parse_json_array(text)
+            except ValueError as exc:
+                retry_error = str(exc)
+                items = []
+            else:
+                retry_error = ""
+
+        if retry_error:
+            response_error = _agent_response_error(
+                agent,
+                "The agent could not produce a valid JSON array after one retry; "
+                "no model findings were accepted. First response: "
+                f"{first_error}. Retry response: {retry_error}.",
+            )
+            items = []
+        else:
+            response_error = None
+    else:
+        response_error = None
     items, dropped = _verified_findings(items, state["current_code"])
     tool_lines = _report_line_numbers(state.get("static_report", ""))
     tool_lines.update(
@@ -197,25 +260,39 @@ def _review(system: str, agent: str, state: dict) -> tuple[list[dict], list[str]
         for finding in state.get("secret_findings", [])
         if isinstance(finding.get("line"), int)
     )
-    return _normalize(items, agent, tool_lines), providers, retried, dropped
-
-
+    return (
+        _normalize(items, agent, tool_lines),
+        providers,
+        retried,
+        dropped,
+        response_error,
+    )
 def security_agent(state: dict) -> dict:
-    findings, providers, retried, dropped = _review(SECURITY_SYSTEM, "security-agent", state)
+    findings, providers, retried, dropped, response_error = _review(
+        SECURITY_SYSTEM, "security-agent", state
+    )
     retry_note = "; retried invalid JSON once" if retried else ""
     return {"security_findings": findings, "providers": providers,
         "dropped_finding_counts": [dropped],
+        "response_errors": [response_error] if response_error else [],
         "log": [f"Security Agent found {len(findings)} issue(s) via {', '.join(providers)}{retry_note}",
-            f"Security Agent dropped {dropped} finding(s) as unverified"]}
+            f"Security Agent dropped {dropped} finding(s) as unverified"]
+            + ([f"Agent response error: {response_error['detail']}"]
+               if response_error else [])}
 
 
 def bug_agent(state: dict) -> dict:
-    findings, providers, retried, dropped = _review(BUG_SYSTEM, "bug-agent", state)
+    findings, providers, retried, dropped, response_error = _review(
+        BUG_SYSTEM, "bug-agent", state
+    )
     retry_note = "; retried invalid JSON once" if retried else ""
     return {"bug_findings": findings, "providers": providers,
         "dropped_finding_counts": [dropped],
+        "response_errors": [response_error] if response_error else [],
         "log": [f"Bug-Detection Agent found {len(findings)} issue(s) via {', '.join(providers)}{retry_note}",
-            f"Bug-Detection Agent dropped {dropped} finding(s) as unverified"]}
+            f"Bug-Detection Agent dropped {dropped} finding(s) as unverified"]
+            + ([f"Agent response error: {response_error['detail']}"]
+               if response_error else [])}
 
 
 def _function_interfaces(source: str) -> dict[str, list[tuple[tuple[str, str, bool], ...]]]:
@@ -362,7 +439,7 @@ def summary_agent(state: dict) -> dict:
     merged, score, passed = merge_and_score(
         state.get("security_findings", []), state.get("bug_findings", []),
         state.get("secret_findings", []) + state.get("ast_findings", []),
-        state.get("interface_findings", []))
+        state.get("interface_findings", []) + state.get("response_errors", []))
     return {
         "merged": merged, "score": score, "passed": passed,
         "score_history": [score],

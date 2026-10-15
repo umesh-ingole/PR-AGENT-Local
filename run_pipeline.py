@@ -198,6 +198,7 @@ def main(argv: list[str] | None = None) -> None:
         "score_history": [],
         "penalty_history": [],
         "rejected_fix_count": 0,
+        "response_errors": [],
         "dropped_finding_counts": [],
         "dropped_unverified_history": [],
         "dropped_finding_count_index": 0,
@@ -225,7 +226,7 @@ def main(argv: list[str] | None = None) -> None:
                 for key, value in update.items():
                     if key in (
                         "providers", "log", "score_history", "penalty_history",
-                        "rejected_fix_count", "dropped_finding_counts",
+                        "rejected_fix_count", "response_errors", "dropped_finding_counts",
                         "dropped_unverified_history",
                     ):
                         default = 0 if key == "rejected_fix_count" else []

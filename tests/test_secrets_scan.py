@@ -115,6 +115,34 @@ def test_summary_includes_scanner_finding_without_llm_call(monkeypatch):
     assert result["passed"] is False
 
 
+def test_summary_includes_agent_response_error_alongside_scanner_findings():
+    from tools import scan_python_patterns
+
+    secret = scan_secrets('API_KEY = "sk-live-123"\n')
+    ast_findings = scan_python_patterns("eval(value)\n")
+    response_error = {
+        "line": None,
+        "severity": "high",
+        "title": "Security Agent response error",
+        "detail": "The agent returned invalid JSON twice.",
+        "code": "",
+        "evidence": "reasoning",
+        "agent": "agent-response-error",
+    }
+    result = agents.summary_agent({
+        "security_findings": [],
+        "bug_findings": [],
+        "secret_findings": secret,
+        "ast_findings": ast_findings,
+        "response_errors": [response_error],
+        "interface_findings": [],
+    })
+
+    assert response_error in result["merged"]
+    assert secret[0] in result["merged"]
+    assert ast_findings[0] in result["merged"]
+
+
 def test_graph_merges_deterministic_secret_when_review_agents_return_no_findings(
     monkeypatch,
 ):

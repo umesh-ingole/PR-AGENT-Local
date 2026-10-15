@@ -31,6 +31,7 @@ class ReviewState(TypedDict, total=False):
     context: str
     security_findings: list
     bug_findings: list
+    response_errors: Annotated[list, operator.add]
     interface_findings: list
     merged: list
     score: int
