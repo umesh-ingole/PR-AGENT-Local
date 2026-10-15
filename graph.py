@@ -22,6 +22,7 @@ class ReviewState(TypedDict, total=False):
     language: str
     original_code: str
     current_code: str
+    run_dir: str
     force_local: bool
     max_iterations: int
     static_tool: str
@@ -85,6 +86,7 @@ def coder_node(state: ReviewState) -> dict:
     update = agents.coder_agent(state)
     previous_code = state["current_code"]
     rejection_errors = []
+    baseline_errors = []
     if state["language"] == "python":
         baseline_errors = run_pylint_errors_only(previous_code)
         candidate_code = update["current_code"]
@@ -140,6 +142,85 @@ def coder_node(state: ReviewState) -> dict:
                     update.setdefault("log", []).append(retry_fix_logs[-1])
     if state["language"] == "python" and not rejection_errors:
         update["current_code"] = candidate_code
+
+    original_iteration = update.get("iteration", state.get("iteration", 0))
+    candidate_code = update["current_code"]
+    candidate_validation_errors = (
+        _python_validation_errors(candidate_code, baseline_errors)
+        if state["language"] == "python"
+        else []
+    )
+    candidate_scanner_findings = _critical_scanner_findings(
+        candidate_code, state["language"]
+    )
+    if candidate_scanner_findings:
+        remediation_update = agents.coder_agent({
+            **state,
+            "current_code": candidate_code,
+            "merged": candidate_scanner_findings,
+            "iteration": max(0, original_iteration - 1),
+            "additional_instruction": (
+                "Fix only the listed critical/high scanner findings. "
+                "Do not change anything else."
+            ),
+        })
+        remediation_code = remediation_update["current_code"]
+        remediation_validation_errors = (
+            _python_validation_errors(remediation_code, baseline_errors)
+            if state["language"] == "python"
+            else []
+        )
+        remediation_scanner_findings = _critical_scanner_findings(
+            remediation_code, state["language"]
+        )
+        candidate_rank = (
+            len(candidate_scanner_findings),
+            len(candidate_validation_errors),
+        )
+        remediation_rank = (
+            len(remediation_scanner_findings),
+            len(remediation_validation_errors),
+        )
+        update["providers"] = (
+            update.get("providers", []) + remediation_update.get("providers", [])
+        )
+        update.setdefault("log", []).extend(
+            line for line in remediation_update.get("log", [])
+            if not line.startswith("Coder Agent applied fixes (round ")
+        )
+        if remediation_update.get("response_errors"):
+            update.setdefault("response_errors", []).extend(
+                remediation_update["response_errors"]
+            )
+        if not remediation_validation_errors and (
+            candidate_validation_errors or remediation_rank < candidate_rank
+        ):
+            update["current_code"] = remediation_code
+            update.setdefault("interface_findings", []).extend(
+                remediation_update.get("interface_findings", [])
+            )
+            candidate_scanner_findings = remediation_scanner_findings
+            candidate_validation_errors = remediation_validation_errors
+        update["iteration"] = original_iteration
+        if candidate_scanner_findings:
+            titles = ", ".join(
+                dict.fromkeys(finding["title"] for finding in candidate_scanner_findings)
+            )
+            update.setdefault("interface_findings", []).append({
+                "line": None,
+                "severity": "high",
+                "title": "Scanner finding could not be fixed automatically",
+                "detail": (
+                    "Critical/high scanner findings remained after one automatic "
+                    f"remediation attempt: {titles}."
+                ),
+                "evidence": "tool",
+                "agent": "scanner-remediation",
+            })
+            update.setdefault("log", []).append(
+                "Scanner remediation left critical/high findings for manual repair"
+            )
+
     # Refresh the linter output on the fixed code so the re-check is grounded.
     code = update["current_code"]
     tool, report = run_static_analysis(state["language"], code)
@@ -155,6 +236,16 @@ def coder_node(state: ReviewState) -> dict:
         update.setdefault("log", []).append(
             f"Python AST scan found {len(ast_findings)} pattern(s)")
     return update
+
+
+def _critical_scanner_findings(code: str, language: str) -> list[dict]:
+    findings = scan_secrets(code)
+    if language == "python":
+        findings += scan_python_patterns(code)
+    return [
+        finding for finding in findings
+        if finding.get("severity") in {"critical", "high"}
+    ]
 
 
 def _python_validation_errors(candidate_code: str, baseline_errors: list[str]) -> list[str]:

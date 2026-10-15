@@ -128,10 +128,18 @@ def test_runner_saves_safe_run_info_when_pipeline_raises(tmp_path, monkeypatch):
     run_dir.parent.mkdir()
     monkeypatch.setattr(run_pipeline, "__file__", str(project_dir / "run_pipeline.py"))
     monkeypatch.setattr(run_pipeline, "create_run_directory", lambda _runs_dir: _make_run_dir(run_dir))
+
+    class FailingGraph:
+        def stream(self, initial, stream_mode):
+            assert stream_mode == "updates"
+            assert initial["run_dir"] == str(run_dir)
+            raise RuntimeError("simulated failure")
+            yield {}
+
     monkeypatch.setattr(
         run_pipeline,
         "build_graph",
-        lambda: (_ for _ in ()).throw(RuntimeError("simulated failure")),
+        FailingGraph,
     )
 
     try:

@@ -196,6 +196,7 @@ def main(argv: list[str] | None = None) -> None:
         "language": language,
         "original_code": code,
         "current_code": code,
+        "run_dir": str(run_dir),
         "force_local": settings["force_local"],
         "max_iterations": settings["max_iterations"],
         "providers": [],

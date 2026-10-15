@@ -120,3 +120,37 @@ def test_call_observer_receives_provider_model_and_elapsed_result(monkeypatch):
     assert events[1][:3] == ("end", "ollama", "mock-model")
     assert events[1][3] >= 0
     assert events[1][4] is True
+
+
+def test_json_format_is_passed_to_ollama_only(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDERS", "ollama")
+    captured = {}
+
+    def fake_make(provider, format=None):
+        captured.update({"provider": provider, "format": format})
+        return types.SimpleNamespace(
+            invoke=lambda _messages: FakeReply()
+        )
+
+    monkeypatch.setattr(llm_gateway, "_make", fake_make)
+
+    assert llm_gateway.call_llm("system", "user", format="json") == (
+        "mock reply", "ollama",
+    )
+    assert captured == {"provider": "ollama", "format": "json"}
+
+
+def test_ollama_client_receives_json_format(monkeypatch):
+    captured = {}
+
+    class FakeOllama:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_module = types.ModuleType("langchain_ollama")
+    fake_module.ChatOllama = FakeOllama
+    monkeypatch.setitem(sys.modules, "langchain_ollama", fake_module)
+
+    llm_gateway._make("ollama", format="json")
+
+    assert captured["format"] == "json"

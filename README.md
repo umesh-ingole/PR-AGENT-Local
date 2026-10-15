@@ -30,6 +30,10 @@ Streamlit app that follows the architecture diagram box for box.
 4. Cloud has no Ollama, so the local fallback only works when you run the app yourself.
    For a hosted fallback, the Groq key is the practical second provider.
 
+## Review safeguards
+- After a Coder Agent fix, Python AST and secrets scans run again. Remaining critical/high findings trigger one bounded remediation call, separate from the configured review-round count; unresolved findings are reported for manual repair.
+- Security and Bug Agent reviews request JSON from Ollama. Invalid replies are retained in the run folder by agent and round with detected secrets redacted.
+
 ## Tuning
 - `config.py`: pass score (80), max fix rounds (3), RAG top-k (2)
 - Add a language: add a tool in `tools.py`, expose it in `mcp_server.py`, map it in `static_analysis.py` and `config.py`

@@ -4,6 +4,7 @@ import difflib
 import json
 import os
 import re
+from pathlib import Path
 
 from config import PASS_SCORE, SEVERITIES, SEVERITY_PENALTY
 from llm_gateway import call_llm
@@ -15,12 +16,13 @@ REVIEW_INCOMPLETE_BANNER = (
 )
 
 FINDING_SCHEMA = (
-    'Return ONLY a JSON array (no prose, no markdown fences). Each item: '
+    'Return ONLY a JSON object with a "findings" array (no prose, no markdown fences). '
+    'Each item: '
     '{"line": <int or null>, "severity": "critical|high|medium|low", '
     '"title": "<short>", "detail": "<what is wrong and how to fix it>", '
     '"code": "<exact offending line copied from the file>", '
     '"evidence": "tool|reasoning"}. Use "tool" only when a static-analysis line '
-    'supports the finding. Return [] if there are no issues.'
+    'supports the finding. Return {"findings": []} if there are no issues.'
 )
 
 SECURITY_SYSTEM = (
@@ -88,9 +90,50 @@ def _parse_json_array(text: str) -> list[dict]:
             f"Response is not valid JSON: {exc.msg} "
             f"(line {exc.lineno}, column {exc.colno})"
         ) from exc
+    if isinstance(data, dict):
+        data = data.get("findings")
     if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
-        raise ValueError("Response must be a JSON array of finding objects")
+        raise ValueError(
+            'Response must be an object with a "findings" array or a JSON array '
+            "of finding objects"
+        )
     return data
+
+
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"""(?i)(["']?[A-Za-z_]\w*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)\w*
+    ["']?[ \t]*[:=][ \t]*)(['"])(.*?)\2""",
+    re.X,
+)
+_KNOWN_SECRET_RE = re.compile(
+    r"\b(?:AIza[0-9A-Za-z_-]{20,}|sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})\b"
+)
+
+
+def _redact_invalid_reply(text: str) -> str:
+    for name, value in os.environ.items():
+        if value and re.search(r"key|secret|token|password|passwd|credential", name, re.I):
+            text = text.replace(value, "[REDACTED]")
+    text = _KNOWN_SECRET_RE.sub("[REDACTED]", text)
+    text = _SECRET_ASSIGNMENT_RE.sub(r"\1\2[REDACTED]\2", text)
+    return re.sub(
+        r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?"
+        r"-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+        "[REDACTED PRIVATE KEY]",
+        text,
+        flags=re.S,
+    )
+
+
+def _save_invalid_reply(state: dict, agent: str, text: str) -> None:
+    run_dir = state.get("run_dir")
+    if not run_dir:
+        return
+    round_number = state.get("iteration", 0) + 1
+    path = Path(run_dir) / f"{agent}_round_{round_number}_invalid_json.txt"
+    with path.open("a", encoding="utf-8") as reply_file:
+        reply_file.write(_redact_invalid_reply(text))
+        reply_file.write("\n\n")
 
 
 def _report_line_numbers(report: str) -> set[int]:
@@ -238,7 +281,9 @@ def _review(
         f"CODE (line-numbered):\n{_numbered(state['current_code'])}"
     )
     try:
-        text, provider = call_llm(system, user, state.get("force_local", False))
+        text, provider = call_llm(
+            system, user, state.get("force_local", False), format="json"
+        )
     except Exception as exc:
         provider_details = _provider_failure_detail(
             exc, state.get("force_local", False)
@@ -254,24 +299,27 @@ def _review(
     try:
         items = _parse_json_array(text)
     except ValueError as first_error:
+        _save_invalid_reply(state, agent, text)
         retry_error = ""
         retry_failure_details = ""
         strict_system = (
             system
             + "\n\nSTRICT FORMAT REMINDER: Your previous response was invalid. "
-            "Return only one valid JSON array of finding objects. Do not include "
-            "prose, markdown fences, or explanations. Return [] if there are no issues."
+            'Return only one valid JSON object with a "findings" array. Do not include '
+            'prose, markdown fences, or explanations. Return {"findings": []} '
+            "if there are no issues."
         )
         retried = True
         retry_user = (
             user
             + "\n\nPREVIOUS RESPONSE JSON PARSE ERROR (exact):\n"
             + str(first_error)
-            + "\nReturn a corrected JSON array only."
+            + '\nReturn a corrected JSON object with a "findings" array only.'
         )
         try:
             text, provider = call_llm(
-                strict_system, retry_user, state.get("force_local", False)
+                strict_system, retry_user, state.get("force_local", False),
+                format="json",
             )
             providers.append(provider)
         except Exception as exc:
@@ -284,6 +332,7 @@ def _review(
             try:
                 items = _parse_json_array(text)
             except ValueError as exc:
+                _save_invalid_reply(state, agent, text)
                 retry_error = str(exc)
                 retry_failure_details = (
                     f"provider={provider} error=InvalidJSON"
@@ -538,6 +587,9 @@ def coder_agent(state: dict) -> dict:
             + "\n".join(validation_errors)
             + "\nFix these errors while preserving the existing behavior and interfaces."
         )
+    additional_instruction = state.get("additional_instruction")
+    if additional_instruction:
+        user += f"\n\nADDITIONAL INSTRUCTION:\n{additional_instruction}"
     try:
         text, provider = call_llm(
             CODER_SYSTEM, user, state.get("force_local", False)

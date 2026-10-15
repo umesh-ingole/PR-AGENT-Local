@@ -79,7 +79,8 @@ def test_both_review_agents_fail_marks_review_incomplete_and_shows_banner(
             raise ConnectionError("mock offline")
 
     monkeypatch.setattr(
-        llm_gateway, "_make", lambda provider: FailingClient(provider)
+        llm_gateway, "_make",
+        lambda provider, **_kwargs: FailingClient(provider),
     )
     coder_calls = []
     monkeypatch.setattr(
@@ -119,7 +120,7 @@ def test_invalid_reply_twice_finishes_without_scoring_or_fixing_warning(monkeypa
     _mock_graph_setup(monkeypatch)
     calls = []
 
-    def invalid_reply(system, _user, _force_local):
+    def invalid_reply(system, _user, _force_local, **_kwargs):
         calls.append(system)
         return "not JSON", "ollama"
 
@@ -148,7 +149,9 @@ def test_invalid_reply_twice_finishes_without_scoring_or_fixing_warning(monkeypa
 
 def test_both_review_agents_succeed_and_no_banner_is_shown(monkeypatch):
     _mock_graph_setup(monkeypatch)
-    monkeypatch.setattr(agents, "call_llm", lambda *_args: ("[]", "mock"))
+    monkeypatch.setattr(
+        agents, "call_llm", lambda *_args, **_kwargs: ("[]", "mock")
+    )
     coder_calls = []
     monkeypatch.setattr(
         agents, "coder_agent", lambda state: coder_calls.append(state) or {}
@@ -263,7 +266,7 @@ def test_coder_prompt_excludes_response_error_and_llm_warning(monkeypatch):
     }
     captured = {}
 
-    def fake_call_llm(_system, user, _force_local):
+    def fake_call_llm(_system, user, _force_local, **_kwargs):
         captured["user"] = user
         return "```python\nprint('ok')\n```", "ollama"
 

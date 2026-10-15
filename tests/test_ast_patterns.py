@@ -188,7 +188,7 @@ def test_coder_prompt_includes_low_severity_ast_and_secret_findings(monkeypatch)
         },
     ]
 
-    def fake_call_llm(_system, user, _force_local):
+    def fake_call_llm(_system, user, _force_local, **_kwargs):
         captured["user"] = user
         return "```python\npass\n```", "mock"
 

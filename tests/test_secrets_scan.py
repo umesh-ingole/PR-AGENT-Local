@@ -166,7 +166,7 @@ def test_graph_merges_deterministic_secret_when_review_agents_return_no_findings
     monkeypatch.setattr(graph, "retrieve_context", lambda *_args: "")
     monkeypatch.setattr(graph, "run_pylint_errors_only", lambda _code: [])
 
-    def mocked_call_llm(system, _user, _force_local=False):
+    def mocked_call_llm(system, _user, _force_local=False, **_kwargs):
         if system == agents.CODER_SYSTEM:
             return f"```python\n{source}```", "mock"
         return "[]", "mock"
@@ -193,8 +193,12 @@ def test_graph_merges_deterministic_secret_when_review_agents_return_no_findings
         "dropped_finding_count_index": 0,
     })
 
-    assert all(
+    assert sum(
         finding["agent"] == "secrets-scan"
         for finding in final_state["merged"]
+    ) == 1
+    assert any(
+        finding["title"] == "Scanner finding could not be fixed automatically"
+        and finding["severity"] == "high"
+        for finding in final_state["merged"]
     )
-    assert len(final_state["merged"]) == 1

@@ -79,7 +79,7 @@ def _provider_order() -> list[str]:
     return providers or ["gemini", "ollama"]
 
 
-def _make(provider: str):
+def _make(provider: str, format: str | None = None):
     if provider == "gemini":
         if not os.getenv("GOOGLE_API_KEY"):
             raise RuntimeError("GOOGLE_API_KEY not set")
@@ -98,11 +98,18 @@ def _make(provider: str):
             num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "8192")),
             num_predict=2048,
             client_kwargs={"timeout": 600},
-            temperature=0.1)
+            temperature=0.1,
+            **({"format": format} if format is not None else {}),
+        )
     raise ValueError(provider)
 
 
-def call_llm(system: str, user: str, force_local: bool = False) -> tuple[str, str]:
+def call_llm(
+    system: str,
+    user: str,
+    force_local: bool = False,
+    format: str | None = None,
+) -> tuple[str, str]:
     """Return (text, provider_used). Raises RuntimeError if every provider fails."""
     global _gemini_unavailable_until
     order = ["ollama"] if force_local else _provider_order()
@@ -115,7 +122,11 @@ def call_llm(system: str, user: str, force_local: bool = False) -> tuple[str, st
         call_started = time.perf_counter()
         _notify_call("start", provider, model, 0.0, None)
         try:
-            llm = _make(provider)
+            llm = (
+                _make(provider, format=format)
+                if provider == "ollama" and format is not None
+                else _make(provider)
+            )
             reply = llm.invoke([("system", system), ("human", user)])
             content = reply.content
             if isinstance(content, list):  # some providers return content blocks

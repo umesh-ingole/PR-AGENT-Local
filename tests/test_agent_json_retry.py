@@ -23,7 +23,8 @@ def test_ollama_invalid_json_gets_one_strict_retry(monkeypatch):
         ("[]", "ollama"),
     ]
 
-    def fake_call_llm(system, user, force_local):
+    def fake_call_llm(system, user, force_local, **kwargs):
+        assert kwargs == {"format": "json"}
         calls.append((system, user, force_local))
         return responses.pop(0)
 
@@ -42,7 +43,8 @@ def test_ollama_invalid_json_gets_one_strict_retry(monkeypatch):
 def test_second_invalid_ollama_response_becomes_unscored_warning(monkeypatch):
     calls = []
 
-    def fake_call_llm(system, user, force_local):
+    def fake_call_llm(system, user, force_local, **kwargs):
+        assert kwargs == {"format": "json"}
         calls.append((system, user, force_local))
         return "not json", "ollama"
 
@@ -165,8 +167,46 @@ def test_agent_prompts_require_current_code_and_quoted_line():
     reminder = "This code may already have been corrected. Report only problems present in the code shown, and quote the line."
 
     assert '"code"' in agents.FINDING_SCHEMA
+    assert '"findings"' in agents.FINDING_SCHEMA
     assert reminder in agents.SECURITY_SYSTEM
     assert reminder in agents.BUG_SYSTEM
+
+
+def test_review_accepts_findings_object_and_plain_array(monkeypatch):
+    responses = iter([
+        (json.dumps({"findings": []}), "ollama"),
+        ("[]", "ollama"),
+    ])
+    monkeypatch.setattr(
+        agents, "call_llm", lambda *_args, **_kwargs: next(responses)
+    )
+
+    assert agents.bug_agent(_state())["bug_findings"] == []
+    assert agents.bug_agent(_state())["bug_findings"] == []
+
+
+def test_invalid_replies_are_saved_per_agent_and_round_with_secrets_redacted(
+    tmp_path, monkeypatch,
+):
+    secret = "mock-private-api-key-value"
+    monkeypatch.setenv("GOOGLE_API_KEY", secret)
+    replies = iter([
+        (f'{{"API_KEY": "{secret}", broken}}', "ollama"),
+        (f'{{"API_KEY": "{secret}", still broken}}', "ollama"),
+    ])
+    monkeypatch.setattr(
+        agents, "call_llm", lambda *_args, **_kwargs: next(replies)
+    )
+    state = {**_state(), "run_dir": str(tmp_path), "iteration": 0}
+
+    result = agents.bug_agent(state)
+
+    debug_file = tmp_path / "bug-agent_round_1_invalid_json.txt"
+    contents = debug_file.read_text(encoding="utf-8")
+    assert len(result["response_errors"]) == 1
+    assert contents.count("[REDACTED]") == 2
+    assert secret not in contents
+    assert "broken" in contents
 
 
 def test_verifies_line_12_quote_with_line_number_prefix(monkeypatch):

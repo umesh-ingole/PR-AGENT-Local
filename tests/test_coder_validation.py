@@ -1,5 +1,6 @@
 import graph
 import agents
+from tools import scan_python_patterns, scan_secrets
 
 
 ORIGINAL_CODE = 'def get_key():\n    return "old"\n'
@@ -123,3 +124,142 @@ def test_validation_errors_are_appended_to_coder_prompt(monkeypatch):
     assert "VALIDATION ERRORS (exact messages):" in captured["user"]
     assert "E0602:Undefined variable 'os'" in captured["user"]
     assert "Fix these errors" in captured["user"]
+
+
+def test_coder_prompt_includes_scanner_remediation_instruction(monkeypatch):
+    captured = {}
+
+    def fake_call_llm(_system, user, _force_local, **_kwargs):
+        captured["user"] = user
+        return f"```python\n{ORIGINAL_CODE}```", "mock"
+
+    monkeypatch.setattr(agents, "call_llm", fake_call_llm)
+    scanner_finding = {
+        "line": 1,
+        "severity": "critical",
+        "title": "Use of eval()",
+        "detail": "Avoid eval.",
+        "code": "eval(data)",
+        "evidence": "tool",
+        "agent": "ast-scan",
+    }
+
+    agents.coder_agent({
+        **_state(),
+        "merged": [scanner_finding],
+        "additional_instruction": (
+            "Fix only the listed critical/high scanner findings. "
+            "Do not change anything else."
+        ),
+    })
+
+    assert "Use of eval()" in captured["user"]
+    assert "Fix only the listed critical/high scanner findings." in captured["user"]
+
+
+def _mock_scanner_remediation(monkeypatch, candidates):
+    calls = []
+
+    def fake_coder(state):
+        calls.append(dict(state))
+        return {
+            "current_code": candidates.pop(0),
+            "iteration": state.get("iteration", 0) + 1,
+            "providers": ["mock"],
+            "interface_findings": [],
+            "log": [
+                "Coder Agent applied fixes "
+                f"(round {state.get('iteration', 0) + 1}) via mock; re-checking"
+            ],
+        }
+
+    monkeypatch.setattr(graph.agents, "coder_agent", fake_coder)
+    monkeypatch.setattr(graph, "run_pylint_errors_only", lambda _code: [])
+    monkeypatch.setattr(graph, "run_static_analysis", lambda *_args: ("pylint", "ok"))
+    monkeypatch.setattr(graph, "scan_python_patterns", scan_python_patterns)
+    monkeypatch.setattr(graph, "scan_secrets", scan_secrets)
+    return calls
+
+
+def test_post_fix_scanner_calls_coder_once_with_only_critical_high_findings(
+    monkeypatch,
+):
+    first_fix = "def parse(data):\n    return eval(data)\n"
+    second_fix = "def parse(data):\n    return data\n"
+    calls = _mock_scanner_remediation(monkeypatch, [first_fix, second_fix])
+
+    update = graph.coder_node({
+        **_state(),
+        "current_code": "def parse(data):\n    return data\n",
+        "merged": [{"severity": "low", "title": "Do not include"}],
+    })
+
+    assert len(calls) == 2
+    followup = calls[1]
+    assert len(followup["merged"]) == 1
+    assert followup["merged"][0]["title"] == "Use of eval()"
+    assert followup["merged"][0]["severity"] == "critical"
+    assert followup["additional_instruction"] == (
+        "Fix only the listed critical/high scanner findings. "
+        "Do not change anything else."
+    )
+    assert update["current_code"] == second_fix
+    assert update["iteration"] == 1
+    assert not any(
+        finding["severity"] == "high"
+        and finding["title"] == "Scanner finding could not be fixed automatically"
+        for finding in update["interface_findings"]
+    )
+
+
+def test_unresolved_scanner_findings_keep_better_code_and_add_high_finding(
+    monkeypatch,
+):
+    first_fix = "def run(data):\n    return eval(data)\n"
+    worse_second_fix = (
+        "import subprocess\n"
+        "def run(data):\n"
+        "    subprocess.run(data, shell=True)\n"
+        "    return eval(data)\n"
+    )
+    calls = _mock_scanner_remediation(
+        monkeypatch, [first_fix, worse_second_fix]
+    )
+
+    update = graph.coder_node({
+        **_state(),
+        "current_code": "def run(data):\n    return data\n",
+    })
+
+    assert len(calls) == 2
+    assert update["current_code"] == first_fix
+    assert update["iteration"] == 1
+    scanner_failure = next(
+        finding for finding in update["interface_findings"]
+        if finding["title"] == "Scanner finding could not be fixed automatically"
+    )
+    assert scanner_failure["severity"] == "high"
+    assert "Use of eval()" in scanner_failure["detail"]
+
+
+def test_invalid_scanner_remediation_candidate_is_rejected_by_python_validation(
+    monkeypatch,
+):
+    first_fix = "def parse(data):\n    return eval(data)\n"
+    invalid_second_fix = "def parse(data):\n    return eval(\n"
+    calls = _mock_scanner_remediation(
+        monkeypatch, [first_fix, invalid_second_fix]
+    )
+
+    update = graph.coder_node({
+        **_state(),
+        "current_code": "def parse(data):\n    return data\n",
+    })
+
+    assert len(calls) == 2
+    assert update["current_code"] == first_fix
+    assert any(
+        finding["title"] == "Scanner finding could not be fixed automatically"
+        and finding["severity"] == "high"
+        for finding in update["interface_findings"]
+    )
