@@ -32,6 +32,16 @@ def test_gemini_client_uses_one_retry_and_90_second_timeout(monkeypatch):
     assert captured["timeout"] == 90
 
 
+def test_missing_gemini_api_key_is_reported_explicitly(monkeypatch):
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_PROVIDERS", "gemini")
+
+    with pytest.raises(llm_gateway.LLMUnavailableError) as error:
+        llm_gateway.call_llm("system", "user")
+
+    assert error.value.failures == (("gemini", "GOOGLE_API_KEY not set"),)
+
+
 def test_quota_error_falls_back_and_skips_gemini_during_cooldown(
     monkeypatch, capsys,
 ):

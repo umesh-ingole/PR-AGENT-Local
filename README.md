@@ -25,10 +25,10 @@ Streamlit app that follows the architecture diagram box for box.
 3. App settings > Secrets:
    ```toml
    GOOGLE_API_KEY = "..."
-   GROQ_API_KEY = "..."
    ```
-4. Cloud has no Ollama, so the local fallback only works when you run the app yourself.
-   For a hosted fallback, the Groq key is the practical second provider.
+4. Reboot the app after saving Secrets. Gemini requires `GOOGLE_API_KEY`.
+   Streamlit Community Cloud cannot reach Ollama running on your computer, and
+   Groq is not currently implemented as an LLM provider.
 
 ## Review safeguards
 - Deterministic AST rewrites replace `eval` with `ast.literal_eval` and unsafe `yaml.load` calls with `yaml.safe_load` before any scanner-remediation call; each rewrite is logged and validated.

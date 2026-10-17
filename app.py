@@ -67,9 +67,17 @@ with st.sidebar:
     max_rounds = st.slider("Max fix rounds", 1, 5, default_rounds)
     st.caption(f"A file passes at score {PASS_SCORE}+ with no critical or high findings.")
     st.divider()
-    st.caption("Provider order: Gemini, then Ollama fallback.")
+    st.caption(
+        "Provider order: Gemini, then Ollama fallback. Ollama must be reachable "
+        "from the app server; Streamlit Community Cloud cannot reach Ollama on your PC."
+    )
     st.caption("Keys found: " + ", ".join(
         k for k in ("GOOGLE_API_KEY",) if os.getenv(k)) or "none (local model only)")
+    if not force_local and not os.getenv("GOOGLE_API_KEY"):
+        st.warning(
+            "Gemini is not configured. In Streamlit Community Cloud, add "
+            "GOOGLE_API_KEY under App settings > Secrets, then reboot the app."
+        )
 
 # ------------------------------------------------------------------- main
 st.title("AI Code Reviewer")
@@ -134,6 +142,13 @@ if st.button("Review and fix", type="primary"):
 result = st.session_state.get("result")
 if result and result["filename"] == filename:
     st.divider()
+    if result.get("review_incomplete"):
+        st.warning(
+            agents.review_incomplete_banner(result)
+            + " On Streamlit Community Cloud, configure GOOGLE_API_KEY in "
+            "App settings > Secrets. Ollama on your PC is not reachable from "
+            "the hosted app."
+        )
     counts = {
         severity: sum(
             1 for finding in result["merged"]
@@ -143,9 +158,15 @@ if result and result["filename"] == filename:
         for severity in SEVERITIES
     }
     cols = st.columns(5)
-    cols[0].metric("Score", f"{result['score']}/100")
+    score_label = "Tool-only score" if result.get("review_incomplete") else "Score"
+    cols[0].metric(score_label, f"{result['score']}/100")
     for col, s in zip(cols[1:], SEVERITIES):
         col.metric(f"{SEV_ICON[s]} {s}", counts[s])
+    if result.get("review_incomplete"):
+        st.caption(
+            "This score and these counts reflect available checks only; "
+            "the AI review did not complete."
+        )
 
     if len(result["score_history"]) > 1:
         st.caption("Score per round: " + " → ".join(str(s) for s in result["score_history"]))
@@ -154,9 +175,6 @@ if result and result["filename"] == filename:
         ["Report", "Original vs fixed", "Static analysis", "Pipeline log"])
 
     with tab_report:
-        banner = agents.review_incomplete_banner(result)
-        if banner:
-            st.warning(banner)
         st.write(result.get("summary", ""))
         warnings = [
             finding for finding in result["merged"]
@@ -171,7 +189,13 @@ if result and result["filename"] == filename:
                 st.write(f["detail"])
                 st.caption(f"Found by {f['agent']} · evidence: {f['evidence']}")
         if not findings:
-            st.success("No actionable findings remain.")
+            if result.get("review_incomplete"):
+                st.info(
+                    "No findings were reported by available checks; "
+                    "the full review did not complete."
+                )
+            else:
+                st.success("No actionable findings remain.")
 
     with tab_diff:
         diff = "".join(difflib.unified_diff(

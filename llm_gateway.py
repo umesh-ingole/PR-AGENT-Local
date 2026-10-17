@@ -179,7 +179,18 @@ def call_llm(
                 _notify_call(
                     "end", provider, model, duration, False, detail
                 )
-                failure = detail if detail else type(exc).__name__
+                missing_google_key = (
+                    provider == "gemini"
+                    and isinstance(exc, RuntimeError)
+                    and str(exc) == "GOOGLE_API_KEY not set"
+                )
+                failure = (
+                    detail
+                    if detail
+                    else "GOOGLE_API_KEY not set"
+                    if missing_google_key
+                    else type(exc).__name__
+                )
                 errors.append((provider, failure))
                 _logger.warning(
                     "LLM provider failed: provider=%s error=%s",
