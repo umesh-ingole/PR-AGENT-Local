@@ -145,26 +145,50 @@ def _report_line_numbers(report: str) -> set[int]:
     return lines
 
 
+def _pylint_categories(report: str) -> dict[int, str]:
+    categories = {}
+    for entry in report.splitlines():
+        fields = entry.split(":", 2)
+        if len(fields) != 3 or not fields[0].isdigit():
+            continue
+        category = fields[1].strip().lower()
+        if category in {"convention", "refactor", "warning", "info", "error", "fatal"}:
+            categories[int(fields[0])] = category
+    return categories
+
+
 def _normalize(
-    items: list[dict], agent: str, tool_lines: set[int] | None = None,
-) -> list[dict]:
+    items: list[dict],
+    agent: str,
+    tool_lines: set[int] | None = None,
+    pylint_categories: dict[int, str] | None = None,
+) -> tuple[list[dict], int]:
     out = []
     tool_lines = tool_lines or set()
+    pylint_categories = pylint_categories or {}
+    capped = 0
     for d in items:
         sev = str(d.get("severity", "low")).lower()
         if sev not in SEVERITIES:
             sev = "low"
         line = d.get("line")
+        category = pylint_categories.get(line)
+        evidence = "tool" if line in tool_lines else "reasoning"
+        if evidence == "tool" and category in {
+            "convention", "refactor", "warning", "info",
+        } and sev != "low":
+            sev = "low"
+            capped += 1
         out.append({
             "line": line if isinstance(line, int) else None,
             "severity": sev,
             "title": str(d.get("title", "Issue"))[:120],
             "detail": str(d.get("detail", ""))[:600],
             "code": d["code"],
-            "evidence": "tool" if line in tool_lines else "reasoning",
+            "evidence": evidence,
             "agent": agent,
         })
-    return out
+    return out, capped
 
 
 def _verify_finding_code(finding: dict, source_lines: list[str]) -> bool:
@@ -273,7 +297,7 @@ def review_incomplete_banner(state: dict) -> str:
 
 def _review(
     system: str, agent: str, state: dict,
-) -> tuple[list[dict], list[str], bool, int, dict | None]:
+) -> tuple[list[dict], list[str], bool, int, dict | None, int]:
     user = (
         f"Language: {state['language']}\n\n"
         f"STATIC ANALYSIS ({state['static_tool']}):\n{state['static_report'][:3000]}\n\n"
@@ -292,7 +316,7 @@ def _review(
             agent,
             f"{agent} could not complete the review; {provider_details}.",
         )
-        return [], [], False, 0, response_error
+        return [], [], False, 0, response_error, 0
 
     providers = [provider]
     retried = False
@@ -358,43 +382,58 @@ def _review(
     else:
         response_error = None
     items, dropped = _verified_findings(items, state["current_code"])
+    pylint_categories = (
+        _pylint_categories(state.get("static_report", ""))
+        if state.get("static_tool") == "pylint"
+        else {}
+    )
     tool_lines = _report_line_numbers(state.get("static_report", ""))
     tool_lines.update(
         finding["line"]
         for finding in state.get("secret_findings", [])
         if isinstance(finding.get("line"), int)
     )
+    normalized, capped = _normalize(
+        items, agent, tool_lines, pylint_categories
+    )
     return (
-        _normalize(items, agent, tool_lines),
+        normalized,
         providers,
         retried,
         dropped,
         response_error,
+        capped,
     )
 def security_agent(state: dict) -> dict:
-    findings, providers, retried, dropped, response_error = _review(
+    findings, providers, retried, dropped, response_error, capped = _review(
         SECURITY_SYSTEM, "security-agent", state
     )
     retry_note = "; retried invalid JSON once" if retried else ""
     return {"security_findings": findings, "providers": providers,
+        "security_agent_failed": response_error is not None,
         "dropped_finding_counts": [dropped],
         "response_errors": [response_error] if response_error else [],
         "log": [f"Security Agent found {len(findings)} issue(s) via {', '.join(providers)}{retry_note}",
             f"Security Agent dropped {dropped} finding(s) as unverified"]
+            + ([f"Severity capped to low for {capped} finding(s) by pylint category"]
+               if capped else [])
             + ([f"LLM unavailable: {response_error['detail']}"]
                if response_error else [])}
 
 
 def bug_agent(state: dict) -> dict:
-    findings, providers, retried, dropped, response_error = _review(
+    findings, providers, retried, dropped, response_error, capped = _review(
         BUG_SYSTEM, "bug-agent", state
     )
     retry_note = "; retried invalid JSON once" if retried else ""
     return {"bug_findings": findings, "providers": providers,
+        "bug_agent_failed": response_error is not None,
         "dropped_finding_counts": [dropped],
         "response_errors": [response_error] if response_error else [],
         "log": [f"Bug-Detection Agent found {len(findings)} issue(s) via {', '.join(providers)}{retry_note}",
             f"Bug-Detection Agent dropped {dropped} finding(s) as unverified"]
+            + ([f"Severity capped to low for {capped} finding(s) by pylint category"]
+               if capped else [])
             + ([f"LLM unavailable: {response_error['detail']}"]
                if response_error else [])}
 

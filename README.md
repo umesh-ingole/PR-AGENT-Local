@@ -31,8 +31,11 @@ Streamlit app that follows the architecture diagram box for box.
    For a hosted fallback, the Groq key is the practical second provider.
 
 ## Review safeguards
+- Deterministic AST rewrites replace `eval` with `ast.literal_eval` and unsafe `yaml.load` calls with `yaml.safe_load` before any scanner-remediation call; each rewrite is logged and validated.
+- Findings attributed to pylint output use its category to cap convention, refactor, warning, and info findings at low severity. Scanner findings retain their scanner-assigned severity.
 - After a Coder Agent fix, Python AST and secrets scans run again. Remaining critical/high findings trigger one bounded remediation call, separate from the configured review-round count; unresolved findings are reported for manual repair.
 - Security and Bug Agent reviews request JSON from Ollama. Invalid replies are retained in the run folder by agent and round with detected secrets redacted.
+- Ollama `ResponseError` calls are retried once after five seconds. Final code and `changes.diff` come from the complete review round with the lowest raw penalty (ties favor the later round); when every round is incomplete, the last round is used.
 
 ## Tuning
 - `config.py`: pass score (80), max fix rounds (3), RAG top-k (2)

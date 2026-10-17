@@ -154,3 +154,48 @@ def test_ollama_client_receives_json_format(monkeypatch):
     llm_gateway._make("ollama", format="json")
 
     assert captured["format"] == "json"
+
+
+def test_ollama_response_error_retries_once_and_reports_redacted_details(
+    monkeypatch, capsys,
+):
+    monkeypatch.setenv("LLM_PROVIDERS", "ollama")
+    secret = "mock-ollama-secret"
+    monkeypatch.setenv("MOCK_API_TOKEN", secret)
+    sleeps = []
+    attempts = []
+    events = []
+
+    class ResponseError(Exception):
+        status_code = 503
+
+    class FailingOllama:
+        def invoke(self, _messages):
+            attempts.append(True)
+            raise ResponseError("backend error " + secret + " " + "x" * 250)
+
+    monkeypatch.setattr(
+        llm_gateway, "_make", lambda _provider, **_kwargs: FailingOllama()
+    )
+    monkeypatch.setattr(llm_gateway.time, "sleep", sleeps.append)
+    previous_observer = llm_gateway.set_call_observer(
+        lambda *event: events.append(event)
+    )
+    try:
+        with pytest.raises(llm_gateway.LLMUnavailableError) as error:
+            llm_gateway.call_llm("system", "user", force_local=True)
+    finally:
+        llm_gateway.set_call_observer(previous_observer)
+
+    assert len(attempts) == 2
+    assert sleeps == [5]
+    assert [event[0] for event in events] == ["start", "end", "start", "end"]
+    assert len([event for event in events if event[0] == "start"]) == 2
+    detail = events[1][5]
+    assert "status_code=503" in detail
+    assert secret not in detail
+    assert detail.count("x") <= 200
+    assert detail in str(error.value)
+    output = capsys.readouterr().out
+    assert output.count("Ollama call failed:") == 2
+    assert secret not in output

@@ -184,8 +184,16 @@ def _mock_scanner_remediation(monkeypatch, candidates):
 def test_post_fix_scanner_calls_coder_once_with_only_critical_high_findings(
     monkeypatch,
 ):
-    first_fix = "def parse(data):\n    return eval(data)\n"
-    second_fix = "def parse(data):\n    return data\n"
+    first_fix = (
+        "import subprocess\n"
+        "def run(command):\n"
+        "    return subprocess.run(command, shell=True)\n"
+    )
+    second_fix = (
+        "import subprocess\n"
+        "def run(command):\n"
+        "    return subprocess.run(command)\n"
+    )
     calls = _mock_scanner_remediation(monkeypatch, [first_fix, second_fix])
 
     update = graph.coder_node({
@@ -197,8 +205,8 @@ def test_post_fix_scanner_calls_coder_once_with_only_critical_high_findings(
     assert len(calls) == 2
     followup = calls[1]
     assert len(followup["merged"]) == 1
-    assert followup["merged"][0]["title"] == "Use of eval()"
-    assert followup["merged"][0]["severity"] == "critical"
+    assert followup["merged"][0]["title"] == "Shell enabled in subprocess call"
+    assert followup["merged"][0]["severity"] == "high"
     assert followup["additional_instruction"] == (
         "Fix only the listed critical/high scanner findings. "
         "Do not change anything else."
@@ -212,18 +220,46 @@ def test_post_fix_scanner_calls_coder_once_with_only_critical_high_findings(
     )
 
 
+def test_eval_and_yaml_findings_are_autofixed_before_scanner_remediation(
+    monkeypatch,
+):
+    first_fix = (
+        "import yaml\n"
+        "def parse(data):\n"
+        "    return eval(data), yaml.load(data)\n"
+    )
+    candidates = [first_fix, "this extra coder call must not happen\n"]
+    calls = _mock_scanner_remediation(monkeypatch, candidates)
+
+    update = graph.coder_node({
+        **_state(),
+        "current_code": "def parse(data):\n    return data\n",
+    })
+
+    assert len(calls) == 1
+    assert "import ast" in update["current_code"]
+    assert "ast.literal_eval(data)" in update["current_code"]
+    assert "yaml.safe_load(data)" in update["current_code"]
+    assert sum(line.startswith("Autofix:") for line in update["log"]) == 2
+
+
 def test_unresolved_scanner_findings_keep_better_code_and_add_high_finding(
     monkeypatch,
 ):
-    first_fix = "def run(data):\n    return eval(data)\n"
-    worse_second_fix = (
+    first_fix = (
         "import subprocess\n"
-        "def run(data):\n"
-        "    subprocess.run(data, shell=True)\n"
-        "    return eval(data)\n"
+        "def run(first, second):\n"
+        "    subprocess.run(first, shell=True)\n"
+        "    subprocess.run(second, shell=True)\n"
+    )
+    better_second_fix = (
+        "import subprocess\n"
+        "def run(first, second):\n"
+        "    subprocess.run(first, shell=True)\n"
+        "    return second\n"
     )
     calls = _mock_scanner_remediation(
-        monkeypatch, [first_fix, worse_second_fix]
+        monkeypatch, [first_fix, better_second_fix]
     )
 
     update = graph.coder_node({
@@ -232,21 +268,25 @@ def test_unresolved_scanner_findings_keep_better_code_and_add_high_finding(
     })
 
     assert len(calls) == 2
-    assert update["current_code"] == first_fix
+    assert update["current_code"] == better_second_fix
     assert update["iteration"] == 1
     scanner_failure = next(
         finding for finding in update["interface_findings"]
         if finding["title"] == "Scanner finding could not be fixed automatically"
     )
     assert scanner_failure["severity"] == "high"
-    assert "Use of eval()" in scanner_failure["detail"]
+    assert "Shell enabled in subprocess call" in scanner_failure["detail"]
 
 
 def test_invalid_scanner_remediation_candidate_is_rejected_by_python_validation(
     monkeypatch,
 ):
-    first_fix = "def parse(data):\n    return eval(data)\n"
-    invalid_second_fix = "def parse(data):\n    return eval(\n"
+    first_fix = (
+        "import subprocess\n"
+        "def run(command):\n"
+        "    return subprocess.run(command, shell=True)\n"
+    )
+    invalid_second_fix = "def run(command):\n    return subprocess.run(command, shell=True\n"
     calls = _mock_scanner_remediation(
         monkeypatch, [first_fix, invalid_second_fix]
     )

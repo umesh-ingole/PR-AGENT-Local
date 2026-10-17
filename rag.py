@@ -19,27 +19,50 @@ def _chunks(text: str) -> list[str]:
     return [f"{title}\n{l}" for l in lines if l.startswith("- ")]
 
 
+def _sync_collection(col) -> None:
+    docs, ids, metas = [], [], []
+    for path in sorted(glob.glob(os.path.join(KNOWLEDGE_DIR, "*.md"))):
+        name = os.path.basename(path)
+        with open(path, encoding="utf-8") as guide_file:
+            for i, chunk in enumerate(_chunks(guide_file.read())):
+                docs.append(chunk)
+                ids.append(f"{name}-{i}")
+                metas.append({"source": name})
+
+    if not docs:
+        return
+
+    existing = col.get(include=["documents", "metadatas"])
+    existing_docs = dict(zip(existing["ids"], existing.get("documents") or []))
+    existing_metas = dict(zip(existing["ids"], existing.get("metadatas") or []))
+    changed = [
+        i for i, chunk_id in enumerate(ids)
+        if (
+            existing_docs.get(chunk_id) != docs[i]
+            or existing_metas.get(chunk_id) != metas[i]
+        )
+    ]
+    if changed:
+        col.upsert(
+            ids=[ids[i] for i in changed],
+            documents=[docs[i] for i in changed],
+            metadatas=[metas[i] for i in changed],
+        )
+
+    stale_ids = sorted(set(existing["ids"]) - set(ids))
+    if stale_ids:
+        col.delete(ids=stale_ids)
+
+
 def _collection():
     global _collection_cache
-    if _collection_cache is not None:
-        return _collection_cache
-    import chromadb
+    if _collection_cache is None:
+        import chromadb
 
-    client = chromadb.PersistentClient(path=DB_DIR)
-    col = client.get_or_create_collection("style_guides")
-    if col.count() == 0:
-        docs, ids, metas = [], [], []
-        for path in sorted(glob.glob(os.path.join(KNOWLEDGE_DIR, "*.md"))):
-            name = os.path.basename(path)
-            with open(path, encoding="utf-8") as f:
-                for i, chunk in enumerate(_chunks(f.read())):
-                    docs.append(chunk)
-                    ids.append(f"{name}-{i}")
-                    metas.append({"source": name})
-        if docs:
-            col.add(documents=docs, ids=ids, metadatas=metas)
-    _collection_cache = col
-    return col
+        client = chromadb.PersistentClient(path=DB_DIR)
+        _collection_cache = client.get_or_create_collection("style_guides")
+    _sync_collection(_collection_cache)
+    return _collection_cache
 
 
 def retrieve_context(language: str, code: str, static_report: str, k: int = 2) -> str:

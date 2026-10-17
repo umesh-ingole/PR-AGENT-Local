@@ -8,7 +8,7 @@ from collections.abc import Callable
 
 GEMINI_COOLDOWN_SECONDS = 10 * 60
 _gemini_unavailable_until = 0.0
-_call_observer: Callable[[str, str, str, float, bool | None], None] | None = None
+_call_observer: Callable[[str, str, str, float, bool | None, str], None] | None = None
 _logger = logging.getLogger(__name__)
 
 
@@ -22,8 +22,8 @@ class LLMUnavailableError(RuntimeError):
 
 
 def set_call_observer(
-    observer: Callable[[str, str, str, float, bool | None], None] | None,
-) -> Callable[[str, str, str, float, bool | None], None] | None:
+    observer: Callable[[str, str, str, float, bool | None, str], None] | None,
+) -> Callable[[str, str, str, float, bool | None, str], None] | None:
     """Set the optional per-attempt observer, returning the previous observer."""
     global _call_observer
     previous = _call_observer
@@ -45,9 +45,10 @@ def _notify_call(
     model: str,
     duration: float,
     success: bool | None,
+    detail: str = "",
 ) -> None:
     if _call_observer is not None:
-        _call_observer(stage, provider, model, duration, success)
+        _call_observer(stage, provider, model, duration, success, detail)
 
 
 def _is_quota_error(exc: Exception) -> bool:
@@ -71,6 +72,30 @@ def _safe_quota_reason(exc: Exception) -> str:
     reason = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[redacted]", reason)
     reason = " ".join(reason.split())
     return reason[:100]
+
+
+def _ollama_response_error_detail(exc: Exception) -> str:
+    text = str(exc)
+    for name, value in os.environ.items():
+        if value and re.search(
+            r"key|secret|token|password|passwd|credential", name, re.I
+        ):
+            text = text.replace(value, "[redacted]")
+    text = re.sub(
+        r"\b(?:AIza[0-9A-Za-z_-]{20,}|sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})\b",
+        "[redacted]",
+        text,
+    )
+    text = re.sub(
+        r"""(?i)(["']?[A-Za-z_]\w*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)\w*
+        ["']?[ \t]*[:=][ \t]*)(['"])(.*?)\2""",
+        r"\1\2[redacted]\2",
+        text,
+        flags=re.X,
+    )
+    text = " ".join(text.split())[:200]
+    status = getattr(exc, "status_code", None)
+    return f"ResponseError status_code={status}: {text}"
 
 
 def _provider_order() -> list[str]:
@@ -119,34 +144,64 @@ def call_llm(
     errors = []
     for provider in order:
         model = _model_name(provider)
-        call_started = time.perf_counter()
-        _notify_call("start", provider, model, 0.0, None)
-        try:
-            llm = (
-                _make(provider, format=format)
-                if provider == "ollama" and format is not None
-                else _make(provider)
-            )
-            reply = llm.invoke([("system", system), ("human", user)])
-            content = reply.content
-            if isinstance(content, list):  # some providers return content blocks
-                content = "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
-            _notify_call("end", provider, model, time.perf_counter() - call_started, True)
-            return content, provider
-        except Exception as exc:
-            duration = time.perf_counter() - call_started
-            _notify_call("end", provider, model, duration, False)
-            errors.append((provider, type(exc).__name__))
-            _logger.warning(
-                "LLM provider failed: provider=%s error=%s",
-                provider,
-                type(exc).__name__,
-            )
-            if provider == "gemini" and _is_quota_error(exc):
-                _gemini_unavailable_until = time.monotonic() + GEMINI_COOLDOWN_SECONDS
-                reason = _safe_quota_reason(exc)
-                fallback = "ollama" in order[order.index(provider) + 1:]
-                suffix = ", falling back to ollama" if fallback else ", no fallback configured"
-                reason_text = f" ({reason})" if reason else ""
-                print(f"gemini quota exhausted (429){reason_text}{suffix}")
+        attempts = 2 if provider == "ollama" else 1
+        for attempt in range(attempts):
+            call_started = time.perf_counter()
+            _notify_call("start", provider, model, 0.0, None)
+            try:
+                llm = (
+                    _make(provider, format=format)
+                    if provider == "ollama" and format is not None
+                    else _make(provider)
+                )
+                reply = llm.invoke([("system", system), ("human", user)])
+                content = reply.content
+                if isinstance(content, list):  # some providers return content blocks
+                    content = "".join(
+                        block.get("text", "") if isinstance(block, dict) else str(block)
+                        for block in content
+                    )
+                _notify_call(
+                    "end", provider, model,
+                    time.perf_counter() - call_started, True,
+                )
+                return content, provider
+            except Exception as exc:
+                duration = time.perf_counter() - call_started
+                is_ollama_response_error = (
+                    provider == "ollama" and type(exc).__name__ == "ResponseError"
+                )
+                detail = (
+                    _ollama_response_error_detail(exc)
+                    if is_ollama_response_error
+                    else ""
+                )
+                _notify_call(
+                    "end", provider, model, duration, False, detail
+                )
+                failure = detail if detail else type(exc).__name__
+                errors.append((provider, failure))
+                _logger.warning(
+                    "LLM provider failed: provider=%s error=%s",
+                    provider,
+                    failure,
+                )
+                if is_ollama_response_error:
+                    print(f"Ollama call failed: {detail}")
+                    if attempt + 1 < attempts:
+                        time.sleep(5)
+                        continue
+                if provider == "gemini" and _is_quota_error(exc):
+                    _gemini_unavailable_until = (
+                        time.monotonic() + GEMINI_COOLDOWN_SECONDS
+                    )
+                    reason = _safe_quota_reason(exc)
+                    fallback = "ollama" in order[order.index(provider) + 1:]
+                    suffix = (
+                        ", falling back to ollama"
+                        if fallback else ", no fallback configured"
+                    )
+                    reason_text = f" ({reason})" if reason else ""
+                    print(f"gemini quota exhausted (429){reason_text}{suffix}")
+                break
     raise LLMUnavailableError(errors)

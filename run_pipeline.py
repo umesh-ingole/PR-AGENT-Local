@@ -99,6 +99,7 @@ def build_run_info(
         "total_elapsed_seconds": round(total_elapsed_seconds, 3),
         "termination_reason": termination_reason,
         "static_analysis_mode": settings["static_analysis_mode"],
+        "best_round": final_state.get("best_round"),
         "raw_penalty_history": list(final_state.get("penalty_history", [])),
         "rejected_fix_count": final_state.get("rejected_fix_count", 0),
         "llm_call_count": final_state.get("llm_call_count", 0),
@@ -142,6 +143,29 @@ def save_final_artifacts(run_dir: Path, filename: str, original: str, fixed: str
     return fixed_path, diff_path
 
 
+def select_best_round(
+    complete_rounds: list[dict], last_code: str, last_round: int,
+) -> tuple[str, int | None, str]:
+    if not complete_rounds:
+        if last_round:
+            return (
+                last_code,
+                last_round,
+                f"No complete review round; using last round {last_round}.",
+            )
+        return last_code, None, "No review rounds completed; using original code."
+    best = max(
+        complete_rounds,
+        key=lambda item: (-item["raw_penalty"], item["round"]),
+    )
+    return (
+        best["code"],
+        best["round"],
+        f"Selected round {best['round']} with lowest complete-round raw penalty "
+        f"({best['raw_penalty']}); ties go to the later round.",
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     settings = pipeline_settings(args.cloud, args.no_fallback)
@@ -175,6 +199,7 @@ def main(argv: list[str] | None = None) -> None:
         model: str,
         duration: float,
         success: bool | None,
+        error_detail: str = "",
     ) -> None:
         nonlocal llm_call_count
         if stage == "start":
@@ -189,6 +214,7 @@ def main(argv: list[str] | None = None) -> None:
                 f"[{time.perf_counter() - started:7.2f}s] "
                 f"LLM call finished: {provider}/{model}; {outcome}; "
                 f"call elapsed {duration:.2f}s"
+                + (f"; {error_detail}" if error_detail else "")
             )
 
     initial = {
@@ -207,6 +233,7 @@ def main(argv: list[str] | None = None) -> None:
         "response_errors": [],
         "dropped_finding_counts": [],
         "dropped_unverified_history": [],
+        "complete_rounds": [],
         "dropped_finding_count_index": 0,
         "review_incomplete": False,
     }
@@ -234,15 +261,23 @@ def main(argv: list[str] | None = None) -> None:
                     if key in (
                         "providers", "log", "score_history", "penalty_history",
                         "rejected_fix_count", "response_errors", "dropped_finding_counts",
-                        "dropped_unverified_history",
+                        "dropped_unverified_history", "complete_rounds",
                     ):
                         default = 0 if key == "rejected_fix_count" else []
                         final[key] = final.get(key, default) + value
                     else:
                         final[key] = value
 
+        best_code, best_round, best_reason = select_best_round(
+            final.get("complete_rounds", []),
+            final["current_code"],
+            score_round,
+        )
+        final["current_code"] = best_code
+        final["best_round"] = best_round
+        print(f"Best round: {best_reason}")
         fixed_path, diff_path = save_final_artifacts(
-            run_dir, filename, initial["original_code"], final["current_code"])
+            run_dir, filename, initial["original_code"], best_code)
     except Exception:
         elapsed = time.perf_counter() - started
         save_run_info(

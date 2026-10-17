@@ -7,6 +7,7 @@ from run_pipeline import (
     save_final_artifacts,
     save_round_findings,
     save_run_info,
+    select_best_round,
     termination_reason,
 )
 
@@ -56,6 +57,7 @@ def test_run_info_records_run_metadata_without_environment_secrets(tmp_path, mon
         "penalty_history": [124, 80, 10],
         "rejected_fix_count": 2,
         "llm_call_count": 7,
+        "best_round": 2,
         "dropped_unverified_history": [4, 1, 0],
     }
 
@@ -82,6 +84,7 @@ def test_run_info_records_run_metadata_without_environment_secrets(tmp_path, mon
     assert saved["raw_penalty_history"] == [124, 80, 10]
     assert saved["rejected_fix_count"] == 2
     assert saved["llm_call_count"] == 7
+    assert saved["best_round"] == 2
     assert saved["dropped_unverified_history"] == [4, 1, 0]
     assert secret not in contents
     assert "GOOGLE_API_KEY" not in contents
@@ -96,6 +99,85 @@ def test_termination_reason_distinguishes_pass_early_stop_and_round_cap():
         {"passed": False, "stop_no_improvement": False, "iteration": 3}, 3
     ) == "round cap"
     assert termination_reason({"passed": False, "iteration": 0}, 3) == "error"
+
+
+def test_best_round_uses_lowest_penalty_and_later_round_for_ties():
+    code, round_number, reason = select_best_round(
+        [
+            {"round": 1, "code": "round one", "raw_penalty": 20},
+            {"round": 2, "code": "round two", "raw_penalty": 10},
+            {"round": 3, "code": "round three", "raw_penalty": 10},
+        ],
+        "last",
+        3,
+    )
+
+    assert (code, round_number) == ("round three", 3)
+    assert "ties go to the later round" in reason
+
+
+def test_best_round_falls_back_to_last_when_all_rounds_are_incomplete():
+    code, round_number, reason = select_best_round([], "last code", 2)
+
+    assert (code, round_number) == ("last code", 2)
+    assert "No complete review round" in reason
+
+
+def test_runner_writes_artifacts_from_best_complete_round(tmp_path, monkeypatch):
+    project_dir = tmp_path / "project"
+    sample_dir = project_dir / "sample"
+    sample_dir.mkdir(parents=True)
+    (sample_dir / "buggy_sample.py").write_text(
+        "value = 0\n", encoding="utf-8"
+    )
+    run_dir = project_dir / "runs" / "test-run"
+    run_dir.parent.mkdir()
+    monkeypatch.setattr(
+        run_pipeline, "__file__", str(project_dir / "run_pipeline.py")
+    )
+    monkeypatch.setattr(
+        run_pipeline,
+        "create_run_directory",
+        lambda _runs_dir: _make_run_dir(run_dir),
+    )
+
+    class CompleteRoundsGraph:
+        def stream(self, initial, stream_mode):
+            assert stream_mode == "updates"
+            for round_number, code, penalty in (
+                (1, "value = 1\n", 15),
+                (2, "value = 2\n", 5),
+            ):
+                yield {"summary": {
+                    "score": 100 - penalty,
+                    "raw_penalty": penalty,
+                    "passed": False,
+                    "iteration": round_number,
+                    "current_code": code,
+                    "merged": [],
+                    "complete_rounds": [{
+                        "round": round_number,
+                        "code": code,
+                        "raw_penalty": penalty,
+                    }],
+                }}
+
+    monkeypatch.setattr(
+        run_pipeline, "build_graph", lambda: CompleteRoundsGraph()
+    )
+
+    run_pipeline.main([])
+
+    assert (run_dir / "buggy_sample.py").read_text(encoding="utf-8") == (
+        "value = 2\n"
+    )
+    diff = (run_dir / "changes.diff").read_text(encoding="utf-8")
+    assert "-value = 0" in diff
+    assert "+value = 2" in diff
+    run_info = json.loads(
+        (run_dir / "run_info.json").read_text(encoding="utf-8")
+    )
+    assert run_info["best_round"] == 2
 
 
 def test_latest_run_loader_prints_info_only_run(tmp_path, monkeypatch, capsys):

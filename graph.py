@@ -11,6 +11,7 @@ from typing import Annotated, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 import agents
+from autofix import apply_python_autofixes
 from config import MAX_ITERATIONS, SEVERITY_PENALTY
 from rag import retrieve_context
 from static_analysis import run_static_analysis
@@ -32,6 +33,8 @@ class ReviewState(TypedDict, total=False):
     context: str
     security_findings: list
     bug_findings: list
+    security_agent_failed: bool
+    bug_agent_failed: bool
     response_errors: Annotated[list, operator.add]
     interface_findings: list
     merged: list
@@ -50,6 +53,7 @@ class ReviewState(TypedDict, total=False):
     rejected_fix_count: Annotated[int, operator.add]
     dropped_finding_counts: Annotated[list, operator.add]
     dropped_unverified_history: Annotated[list, operator.add]
+    complete_rounds: Annotated[list, operator.add]
     dropped_finding_count_index: int
 
 
@@ -142,6 +146,27 @@ def coder_node(state: ReviewState) -> dict:
                     update.setdefault("log", []).append(retry_fix_logs[-1])
     if state["language"] == "python" and not rejection_errors:
         update["current_code"] = candidate_code
+
+    if state["language"] == "python":
+        remaining_patterns = scan_python_patterns(update["current_code"])
+        autofixable = [
+            finding for finding in remaining_patterns
+            if finding["title"] in {"Use of eval()", "Unsafe yaml.load()"}
+        ]
+        if autofixable:
+            fixed_code, rewrites = apply_python_autofixes(update["current_code"])
+            autofix_errors = _python_validation_errors(fixed_code, baseline_errors)
+            if not autofix_errors:
+                update["current_code"] = fixed_code
+                update.setdefault("log", []).extend(
+                    f"Autofix: {rewrite['rule']} (line {rewrite['line']})"
+                    for rewrite in rewrites
+                )
+            else:
+                update.setdefault("log", []).append(
+                    "Autofix rejected by Python validation: "
+                    + "; ".join(autofix_errors)
+                )
 
     original_iteration = update.get("iteration", state.get("iteration", 0))
     candidate_code = update["current_code"]
@@ -280,14 +305,44 @@ def summary_node(state: ReviewState) -> dict:
     )
     update["raw_penalty"] = raw_penalty
     update["penalty_history"] = [raw_penalty]
-    review_incomplete = state.get("review_incomplete", False) or any(
-        agents._is_incomplete_review_warning(finding)
-        for finding in update["merged"]
+    security_failed = state.get("security_agent_failed")
+    bug_failed = state.get("bug_agent_failed")
+    has_round_agent_flags = (
+        security_failed is not None and bug_failed is not None
+    )
+    if security_failed is None or bug_failed is None:
+        failed_stages = {
+            str(finding.get("stage", "")).lower().replace("-", " ")
+            for finding in update["merged"]
+            if agents._is_incomplete_review_warning(finding)
+        }
+        security_failed = security_failed if security_failed is not None else (
+            "security agent" in failed_stages
+        )
+        bug_failed = bug_failed if bug_failed is not None else (
+            "bug agent" in failed_stages
+        )
+    review_incomplete = (
+        bool(security_failed and bug_failed)
+        if has_round_agent_flags
+        else bool(security_failed or bug_failed)
+    ) or (
+        not has_round_agent_flags
+        and any(
+            finding.get("agent") == "agent-response-error"
+            for finding in update["merged"]
+        )
     )
     update["review_incomplete"] = review_incomplete
     if review_incomplete:
         update["passed"] = False
         update.setdefault("log", []).append(agents.REVIEW_INCOMPLETE_BANNER)
+    elif security_failed or bug_failed:
+        failed_agent = "Security Agent" if security_failed else "Bug-Detection Agent"
+        update.setdefault("log", []).append(
+            f"Review round incomplete: {failed_agent} failed; continuing with "
+            "the other review agent and scanner findings"
+        )
     previous_penalties = state.get("penalty_history", [])
     if previous_penalties and raw_penalty >= previous_penalties[-1]:
         update["stop_no_improvement"] = True
@@ -303,6 +358,14 @@ def summary_node(state: ReviewState) -> dict:
     update["dropped_finding_count_index"] = len(dropped_counts)
     update["dropped_unverified_count"] = round_dropped
     update["dropped_unverified_history"] = [round_dropped]
+    if not security_failed and not bug_failed:
+        update["complete_rounds"] = [{
+            "round": state.get("iteration", 0) + 1,
+            "code": state.get("current_code", ""),
+            "raw_penalty": raw_penalty,
+        }]
+    else:
+        update["complete_rounds"] = []
     return update
 
 

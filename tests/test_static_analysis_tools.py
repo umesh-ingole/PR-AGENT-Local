@@ -71,3 +71,17 @@ def test_static_tool_timeout_is_reported(monkeypatch):
     monkeypatch.setattr(tools.shutil, "which", lambda _command: "checker.exe")
 
     assert tools._run(["checker"]) == "[checker timed out after 60s]"
+
+
+def test_cppcheck_uses_standard_windows_install_path(monkeypatch):
+    monkeypatch.setattr(tools.shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(
+        tools.os.path,
+        "exists",
+        lambda path: path == r"C:\Program Files\Cppcheck\cppcheck.exe",
+    )
+
+    assert tools._resolve_command(["cppcheck", "--version"]) == [
+        r"C:\Program Files\Cppcheck\cppcheck.exe",
+        "--version",
+    ]

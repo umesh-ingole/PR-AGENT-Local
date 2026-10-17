@@ -12,6 +12,12 @@ import sys
 import tempfile
 
 TIMEOUT = 60
+_COMMON_WINDOWS_TOOL_PATHS = {
+    "cppcheck": (
+        r"C:\Program Files\Cppcheck\cppcheck.exe",
+        r"C:\Program Files (x86)\Cppcheck\cppcheck.exe",
+    )
+}
 
 _SENSITIVE_NAME_RE = re.compile(r"key|secret|token|password|passwd|credential", re.I)
 _KEY_TOKEN_NAME_RE = re.compile(r"key|token", re.I)
@@ -289,13 +295,32 @@ def scan_python_patterns(code: str) -> list[dict]:
     return sorted(findings.values(), key=lambda item: (item["line"], item["title"]))
 
 
+def _resolve_command(cmd: list[str]) -> list[str]:
+    if not cmd:
+        return cmd
+    tool_name = cmd[0]
+    if tool_name == sys.executable:
+        return cmd
+
+    resolved = shutil.which(tool_name)
+    if resolved:
+        return [resolved, *cmd[1:]]
+
+    for alt in _COMMON_WINDOWS_TOOL_PATHS.get(tool_name, ()):
+        if os.path.exists(alt):
+            return [alt, *cmd[1:]]
+    return cmd
+
+
 def _run(cmd: list[str]) -> str:
+    original_name = cmd[0]
+    cmd = _resolve_command(cmd)
     if shutil.which(cmd[0]) is None and cmd[0] != sys.executable:
-        return f"[{cmd[0]} is not installed on this machine - skipped]"
+        return f"[{original_name} is not installed on this machine - skipped]"
     try:
         p = _run_process(cmd)
     except subprocess.TimeoutExpired:
-        return f"[{cmd[0]} timed out after {TIMEOUT}s]"
+        return f"[{original_name} timed out after {TIMEOUT}s]"
     return ((p.stdout or "") + (p.stderr or "")).strip() or "[no issues reported]"
 
 

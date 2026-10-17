@@ -166,6 +166,133 @@ def test_both_review_agents_succeed_and_no_banner_is_shown(monkeypatch):
     assert coder_calls == []
 
 
+def test_single_review_agent_failure_continues_through_another_round(monkeypatch):
+    source = "def parse(value):\n    return eval(value)\n"
+    safe_code = "import ast\n\ndef parse(value):\n    return ast.literal_eval(value)\n"
+    security_calls = []
+    coder_calls = []
+
+    monkeypatch.setattr(
+        graph, "run_static_analysis", lambda *_args: ("pylint", "[no issues]")
+    )
+    monkeypatch.setattr(graph, "retrieve_context", lambda *_args: "")
+    monkeypatch.setattr(graph, "run_pylint_errors_only", lambda _code: [])
+
+    def security_agent(_state):
+        security_calls.append(True)
+        if len(security_calls) == 1:
+            warning = agents._llm_unavailable_finding(
+                "Security Agent", "provider=ollama error=TimeoutError"
+            )
+            return {
+                "security_findings": [],
+                "security_agent_failed": True,
+                "response_errors": [warning],
+                "providers": [],
+                "log": ["Security Agent unavailable"],
+            }
+        return {
+            "security_findings": [],
+            "security_agent_failed": False,
+            "response_errors": [],
+            "providers": ["mock"],
+            "log": ["Security Agent recovered"],
+        }
+
+    def bug_agent(_state):
+        return {
+            "bug_findings": [{
+                "line": 2,
+                "severity": "medium",
+                "title": "Input parsing issue",
+                "detail": "Handle this input parsing issue.",
+                "code": "    return eval(value)",
+                "evidence": "reasoning",
+                "agent": "bug-agent",
+            }],
+            "bug_agent_failed": False,
+            "response_errors": [],
+            "providers": ["mock"],
+            "log": ["Bug Agent succeeded"],
+        }
+
+    def coder_agent(state):
+        coder_calls.append(state)
+        return {
+            "current_code": safe_code,
+            "iteration": state.get("iteration", 0) + 1,
+            "providers": ["mock"],
+            "interface_findings": [],
+            "log": ["Coder Agent applied fixes (round 1) via mock; re-checking"],
+        }
+
+    monkeypatch.setattr(graph.agents, "security_agent", security_agent)
+    monkeypatch.setattr(graph.agents, "bug_agent", bug_agent)
+    monkeypatch.setattr(graph.agents, "coder_agent", coder_agent)
+    monkeypatch.setattr(
+        agents, "write_summary_with_provider", lambda _state: ("done", "mock")
+    )
+
+    result = graph.build_graph().invoke({
+        **_initial_state(),
+        "current_code": source,
+        "original_code": source,
+        "force_local": True,
+        "max_iterations": 2,
+    })
+
+    assert len(security_calls) == 2
+    assert len(coder_calls) == 1
+    assert any(
+        finding["title"] == "Use of eval()"
+        for finding in coder_calls[0]["merged"]
+    )
+    assert any(
+        finding["title"] == "Input parsing issue"
+        for finding in coder_calls[0]["merged"]
+    )
+    assert result["iteration"] == 1
+    assert result["review_incomplete"] is False
+    assert any(
+        "Review round incomplete: Security Agent failed; continuing" in line
+        for line in result["log"]
+    )
+
+
+def test_ollama_response_error_details_reach_unavailable_finding(
+    monkeypatch, capsys,
+):
+    secret = "mock-review-secret"
+    monkeypatch.setenv("LLM_PROVIDERS", "ollama")
+    monkeypatch.setenv("MOCK_SECRET_TOKEN", secret)
+    monkeypatch.setattr(llm_gateway.time, "sleep", lambda _seconds: None)
+
+    class ResponseError(Exception):
+        status_code = 500
+
+    class FailingOllama:
+        def invoke(self, _messages):
+            raise ResponseError("response failed " + secret + " " + "y" * 230)
+
+    monkeypatch.setattr(
+        llm_gateway, "_make",
+        lambda _provider, **_kwargs: FailingOllama(),
+    )
+    result = agents.security_agent({
+        **_initial_state(),
+        "static_tool": "pylint",
+        "static_report": "",
+        "context": "",
+        "force_local": True,
+    })
+
+    detail = result["response_errors"][0]["detail"]
+    assert "status_code=500" in detail
+    assert "response failed" in detail
+    assert secret not in detail
+    assert secret not in capsys.readouterr().out
+
+
 def test_app_report_places_exact_incomplete_banner_near_the_top():
     warning = agents._llm_unavailable_finding(
         "Security Agent", "provider=ollama error=TimeoutError"

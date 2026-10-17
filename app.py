@@ -88,7 +88,7 @@ elif use_sample or st.session_state.get("sample"):
     with open(os.path.join(os.path.dirname(__file__), "sample", filename), encoding="utf-8") as f:
         code = f.read()
 
-if code is None:
+if code is None or filename is None:
     st.info("Choose a file to begin.")
     st.stop()
 

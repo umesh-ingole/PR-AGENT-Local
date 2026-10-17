@@ -79,7 +79,7 @@ def test_valid_empty_retry_is_not_reported_as_response_error(monkeypatch):
     assert result["response_errors"] == []
 
 
-def _finding(code, line=1):
+def _finding(code, line: int | None = 1):
     return {
         "line": line,
         "severity": "high",
@@ -183,6 +183,36 @@ def test_review_accepts_findings_object_and_plain_array(monkeypatch):
 
     assert agents.bug_agent(_state())["bug_findings"] == []
     assert agents.bug_agent(_state())["bug_findings"] == []
+
+
+def test_tool_finding_severity_is_capped_by_pylint_category():
+    raw = [
+        _finding("line one", line=1),
+        _finding("line two", line=2),
+        _finding("line three", line=3),
+    ]
+    for item, severity in zip(raw, ("high", "critical", "high")):
+        item["severity"] = severity
+
+    normalized, capped = agents._normalize(
+        raw,
+        "bug-agent",
+        {1, 2, 3},
+        {1: "convention", 2: "warning", 3: "error"},
+    )
+
+    assert capped == 2
+    assert [item["severity"] for item in normalized] == ["low", "low", "high"]
+    assert all(item["evidence"] == "tool" for item in normalized)
+
+
+def test_ast_scanner_finding_severity_is_not_capped_as_pylint_tool():
+    from tools import scan_python_patterns
+
+    finding = scan_python_patterns("eval(value)\n")[0]
+
+    assert finding["severity"] == "critical"
+    assert finding["agent"] == "ast-scan"
 
 
 def test_invalid_replies_are_saved_per_agent_and_round_with_secrets_redacted(
